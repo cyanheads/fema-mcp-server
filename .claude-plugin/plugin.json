@@ -1,17 +1,17 @@
 {
-  "name": "fema-mcp-server",
+  "name": "@cyanheads/fema-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": ""
+    "name": "cyanheads"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/fema-mcp-server#readme",
+  "repository": "git+https://github.com/cyanheads/fema-mcp-server.git",
   "license": "Apache-2.0",
   "mcpServers": {
     "fema-mcp-server": {
       "command": "npx",
-      "args": ["-y", "fema-mcp-server"],
+      "args": ["-y", "@cyanheads/fema-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio"
       }

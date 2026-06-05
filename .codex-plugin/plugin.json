@@ -1,25 +1,34 @@
 {
-  "name": "fema-mcp-server",
+  "name": "@cyanheads/fema-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "",
-    "email": "",
-    "url": ""
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/fema-mcp-server#readme",
+  "repository": "git+https://github.com/cyanheads/fema-mcp-server.git",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "fema",
+    "disaster",
+    "emergency-management",
+    "nfip",
+    "flood-insurance"
+  ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "fema-mcp-server",
-    "shortDescription": "",
-    "longDescription": "",
-    "developerName": "",
-    "category": "",
+    "displayName": "@cyanheads/fema-mcp-server",
+    "shortDescription": "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims.",
+    "longDescription": "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims via MCP. STDIO or Streamable HTTP.",
+    "developerName": "cyanheads",
+    "category": "data",
     "capabilities": ["Read"],
-    "websiteURL": "",
+    "websiteURL": "https://github.com/cyanheads/fema-mcp-server",
     "defaultPrompt": []
   }
 }

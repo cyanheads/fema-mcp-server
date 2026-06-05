@@ -11,38 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
-## What's Next?
-
-When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
-
-1. **Re-run the `setup` skill** — ensures CLAUDE.md, skills, structure, and metadata are populated and up to date with the current codebase
-2. **Run the `design-mcp-server` skill** — if the tool/resource surface hasn't been mapped yet, work through domain design
-3. **Add tools/resources/prompts** — scaffold new definitions using the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt` skills
-4. **Add services** — scaffold domain service integrations using the `add-service` skill
-5. **Add tests** — scaffold tests for existing definitions using the `add-test` skill
-6. **Field-test definitions** — exercise tools/resources/prompts with real inputs using the `field-test` skill, get a report of issues and pain points
-7. **Run `devcheck`** — lint, format, typecheck, and security audit
-8. **Run the `security-pass` skill** — audit handlers for MCP-specific security gaps: output injection, scope blast radius, input sinks, tenant isolation
-9. **Run the `polish-docs-meta` skill** — finalize README, CHANGELOG, metadata, and agent protocol for shipping
-10. **Run the `maintenance` skill** — investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest`
-
-Tailor suggestions to what's actually missing or stale — don't recite the full list every time.
-
----
-
 ## Core Rules
 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
@@ -61,34 +29,31 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const femaSearchDisasters = tool('fema_search_disasters', {
+  description: 'Search federal disaster declarations by state, incident type, declaration type, and date range.',
+  annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    state: z.string().length(2).optional().describe('Two-letter US state code (e.g. TX)'),
+    limit: z.number().int().default(20).describe('Max results (1–1000)'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    declarations: z.array(z.object({
+      disasterNumber: z.number().describe('Unique FEMA disaster number'),
+      declarationTitle: z.string().describe('Official disaster title'),
+      state: z.string().describe('Two-letter state code'),
+    })).describe('Matching disaster declarations'),
+    count: z.number().describe('Total matching records'),
   }),
-  auth: ['inventory:read'],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const results = await getOpenFemaService().searchDisasters(input, ctx);
+    ctx.log.info('Disaster search completed', { state: input.state, count: results.count });
+    return results;
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
   format: (result) => [{
     type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
+    text: result.declarations.map(d => `**${d.disasterNumber}**: ${d.declarationTitle} (${d.state})`).join('\n'),
   }],
 });
 ```
@@ -99,14 +64,13 @@ export const searchItems = tool('search_items', {
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
+export const femaDisasterResource = resource('fema://disaster/{disasterNumber}', {
+  description: 'Summary for a specific FEMA disaster declaration by disaster number.',
+  params: z.object({ disasterNumber: z.string().describe('FEMA disaster number') }),
   async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
+    const disaster = await getOpenFemaService().getDisaster(Number(params.disasterNumber), ctx);
+    if (!disaster) throw notFound(`Disaster ${params.disasterNumber} not found`, { disasterNumber: params.disasterNumber });
+    return disaster;
   },
 });
 ```
@@ -227,16 +191,20 @@ src/
   config/
     server-config.ts                    # Server-specific env vars (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    canvas/                             # DataCanvas service (DuckDB spillover)
+    openfema/                           # OpenFEMA REST API client and service
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      fema-search-disasters.tool.ts     # Search disaster declarations
+      fema-get-disaster.tool.ts         # Get single disaster by number
+      fema-get-public-assistance.tool.ts # PA funded project records
+      fema-get-housing-assistance.tool.ts # IA housing data (owners/renters)
+      fema-search-nfip.tool.ts          # NFIP Claims with DuckDB canvas spillover
+      fema-dataframe-describe.tool.ts   # List canvas tables/columns
+      fema-dataframe-query.tool.ts      # SQL SELECT against canvas tables
+      fema-query-dataset.tool.ts        # Generic OData escape hatch
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      fema-disaster.resource.ts         # fema://disaster/{disasterNumber}
 ```
 
 ---
