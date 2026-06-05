@@ -44,9 +44,10 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 # Copy dependency manifests
 COPY package.json bun.lock ./
 
-# Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
-# that are not needed in the final production image.
-RUN bun install --production --frozen-lockfile --ignore-scripts
+# Copy node_modules from the build stage — avoids reinstalling native modules.
+# @duckdb/node-api requires native binaries compiled in the build stage;
+# copying the pre-built artifacts keeps the production image free of build tools.
+COPY --from=build /usr/src/app/node_modules ./node_modules
 
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
 # These are not bundled by default to keep the base image lean. Enable at build time
