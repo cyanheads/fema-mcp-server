@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-06-05 10:16:51
+Generated on: 2026-06-05 12:11:49
 
 ```text
 fema-mcp-server/
@@ -19,6 +19,7 @@ fema-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -165,6 +166,7 @@ fema-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
