@@ -135,9 +135,8 @@ export const femaGetDisaster = tool('fema_get_disaster', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(`# DR-${result.disaster_number} — ${result.title}`);
-    const stateLabel = result.state;
     lines.push(
-      `**State:** ${stateLabel} | **Type:** ${result.declaration_type} | **Incident:** ${result.incident_type}`,
+      `**State:** ${result.state} | **Type:** ${result.declaration_type} | **Incident:** ${result.incident_type}`,
     );
     lines.push(`**Declared:** ${result.declaration_date}`);
     if (result.incident_begin_date) {

@@ -89,13 +89,10 @@ describe('femaSearchNfip — no canvas', () => {
     expect(result.total_count).toBe(1);
   });
 
-  it('throws state_required when state is missing', async () => {
-    const ctx = createMockContext({ errors: femaSearchNfip.errors });
-    // state has a Zod required constraint — bypass by casting
-    const input = { state: '', limit: 100 } as ReturnType<typeof femaSearchNfip.input.parse>;
-    await expect(femaSearchNfip.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'state_required' },
-    });
+  it('rejects empty state at the Zod validation layer', () => {
+    // state is required and must be exactly 2 chars — Zod rejects before the handler runs
+    expect(() => femaSearchNfip.input.parse({ state: '' })).toThrow();
+    expect(() => femaSearchNfip.input.parse({})).toThrow();
   });
 
   it('handles sparse claim rows with missing optional fields', async () => {

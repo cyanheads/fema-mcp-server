@@ -5,7 +5,6 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { type ColumnSchema, spillover } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 
@@ -194,23 +193,8 @@ export const femaSearchNfip = tool('fema_search_nfip', {
   enrichment: {
     notice: z.string().optional().describe('Guidance on canvas usage or result scope.'),
   },
-  errors: [
-    {
-      reason: 'state_required',
-      code: JsonRpcErrorCode.InvalidParams,
-      when: 'state parameter was not provided or is empty.',
-      recovery:
-        'Provide a valid 2-letter US state code. The full NFIP dataset is 2.7M rows and cannot be fetched without a state filter.',
-    },
-  ],
 
   async handler(input, ctx) {
-    if (!input.state?.trim()) {
-      throw ctx.fail('state_required', 'state is required for NFIP claims queries.', {
-        ...ctx.recoveryFor('state_required'),
-      });
-    }
-
     const filterParts: string[] = [`state eq '${input.state}'`];
     if (input.county_code?.trim()) {
       filterParts.push(`countyCode eq '${input.county_code}'`);

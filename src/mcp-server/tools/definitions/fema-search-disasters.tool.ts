@@ -233,10 +233,9 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     }
 
     const svc = getOpenFemaService();
-    const filterExpr = filterParts.length > 0 ? filterParts.join(' and ') : undefined;
     const { rows, count } = await svc.fetchDisasters(
       {
-        ...(filterExpr ? { filter: filterExpr } : {}),
+        ...(filterParts.length > 0 ? { filter: filterParts.join(' and ') } : {}),
         select:
           'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
