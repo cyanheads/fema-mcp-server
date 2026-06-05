@@ -20,6 +20,16 @@ import type {
   RawPaProject,
 } from './types.js';
 
+/**
+ * Escape a string value for embedding in an OData string literal (single-quoted).
+ * OData 3 escapes a literal single quote as two consecutive single quotes ('').
+ * Without this, user-supplied strings containing ' can break out of the literal
+ * and alter the filter structure.
+ */
+export function escapeODataString(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
 /** Build encoded OData query string — uses %24 prefix for $ params (Akamai requirement). */
 function buildODataQuery(opts: OpenFemaQueryOptions): string {
   const parts: string[] = [];

@@ -17,6 +17,7 @@ vi.mock('@/services/openfema/openfema-service.js', () => {
   return {
     getOpenFemaService: () => _mockSvc,
     initOpenFemaService: () => {},
+    escapeODataString: (value: string) => value.replace(/'/g, "''"),
     __setMock: (svc: Record<string, unknown>) => {
       _mockSvc = svc;
     },

@@ -6,7 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { type ColumnSchema, spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
-import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
 
 /** Inline preview budget — ~25k tokens of JSON. */
 const PREVIEW_CHARS = 100_000;
@@ -195,12 +195,12 @@ export const femaSearchNfip = tool('fema_search_nfip', {
   },
 
   async handler(input, ctx) {
-    const filterParts: string[] = [`state eq '${input.state}'`];
+    const filterParts: string[] = [`state eq '${escapeODataString(input.state)}'`];
     if (input.county_code?.trim()) {
-      filterParts.push(`countyCode eq '${input.county_code}'`);
+      filterParts.push(`countyCode eq '${escapeODataString(input.county_code)}'`);
     }
     if (input.zip_code?.trim()) {
-      filterParts.push(`reportedZipCode eq '${input.zip_code}'`);
+      filterParts.push(`reportedZipCode eq '${escapeODataString(input.zip_code)}'`);
     }
     if (input.year_from != null) {
       filterParts.push(`yearOfLoss ge ${input.year_from}`);

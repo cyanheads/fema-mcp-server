@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
 
 /** Valid US state/territory abbreviations accepted by OpenFEMA. */
 const US_STATES = new Set([
@@ -219,17 +219,17 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     const filterParts: string[] = [];
     if (input.state) filterParts.push(`state eq '${input.state}'`);
     if (input.incident_type) {
-      filterParts.push(`substringof('${input.incident_type}', incidentType)`);
+      filterParts.push(`substringof('${escapeODataString(input.incident_type)}', incidentType)`);
     }
     if (input.declaration_type) filterParts.push(`declarationType eq '${input.declaration_type}'`);
     if (input.date_from) {
-      filterParts.push(`declarationDate ge '${input.date_from}T00:00:00.000Z'`);
+      filterParts.push(`declarationDate ge '${escapeODataString(input.date_from)}T00:00:00.000Z'`);
     }
     if (input.date_to) {
-      filterParts.push(`declarationDate le '${input.date_to}T23:59:59.999Z'`);
+      filterParts.push(`declarationDate le '${escapeODataString(input.date_to)}T23:59:59.999Z'`);
     }
     if (input.county?.trim()) {
-      filterParts.push(`substringof('${input.county}', designatedArea)`);
+      filterParts.push(`substringof('${escapeODataString(input.county)}', designatedArea)`);
     }
 
     const svc = getOpenFemaService();

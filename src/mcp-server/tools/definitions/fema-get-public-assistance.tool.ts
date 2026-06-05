@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
 
 export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   title: 'Get FEMA Public Assistance Projects',
@@ -155,7 +155,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       filterParts.push(`stateAbbreviation eq '${input.state}'`);
     }
     if (input.county?.trim()) {
-      filterParts.push(`substringof('${input.county}', county)`);
+      filterParts.push(`substringof('${escapeODataString(input.county)}', county)`);
     }
 
     const svc = getOpenFemaService();
