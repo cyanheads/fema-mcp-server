@@ -61,7 +61,7 @@ describe('femaSearchDisasters', () => {
       state: 'TX',
       declaration_type: 'DR',
     });
-    expect(result.total_count).toBe(1);
+    expect(result.total_area_rows).toBe(1);
     expect(result.returned_count).toBe(1);
   });
 
@@ -79,7 +79,7 @@ describe('femaSearchDisasters', () => {
     expect(result.declarations).toHaveLength(2);
     const dr4781 = result.declarations.find((d) => d.disaster_number === 4781);
     expect(dr4781?.designated_area_count).toBe(2);
-    expect(result.total_count).toBe(50);
+    expect(result.total_area_rows).toBe(50);
   });
 
   it('throws invalid_state for unknown state codes', async () => {

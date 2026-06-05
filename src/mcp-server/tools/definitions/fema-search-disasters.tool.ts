@@ -178,8 +178,16 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
           .describe('Deduplicated summary for one disaster declaration.'),
       )
       .describe('Disaster declarations matching the search, one entry per unique disaster number.'),
-    total_count: z.number().describe('Total matching declarations before the limit/offset window.'),
-    returned_count: z.number().describe('Number of declarations in this response (≤ limit).'),
+    total_area_rows: z
+      .number()
+      .describe(
+        'Total matching designated-area rows from the API before pagination. ' +
+          'DisasterDeclarationsSummaries returns one row per designated area per disaster — ' +
+          'this count is higher than the number of unique declarations in `declarations`.',
+      ),
+    returned_count: z
+      .number()
+      .describe('Number of unique deduplicated declarations in this response.'),
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when no results were found.'),
@@ -296,14 +304,16 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     ctx.log.info('Disaster search complete', { count, returned: declarations.length });
     return {
       declarations,
-      total_count: count,
+      total_area_rows: count,
       returned_count: declarations.length,
     };
   },
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`**${result.returned_count} of ${result.total_count} declarations**\n`);
+    lines.push(
+      `**${result.returned_count} unique declaration(s)** (from ${result.total_area_rows} designated-area rows)\n`,
+    );
     for (const d of result.declarations) {
       lines.push(`## DR-${d.disaster_number} — ${d.title}`);
       lines.push(

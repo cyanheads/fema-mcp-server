@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { spillover } from '@cyanheads/mcp-ts-core/canvas';
+import { type ColumnSchema, spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
@@ -13,6 +13,28 @@ import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 const PREVIEW_CHARS = 100_000;
 /** Cap on rows registered to canvas. */
 const MAX_CANVAS_ROWS = 50_000;
+
+/**
+ * Explicit DuckDB schema for NFIP canvas tables. All fields are nullable to
+ * prevent NOT NULL constraint failures during append: the sniff-based schema
+ * inference marks a column NOT NULL when every row in the sniff window has a
+ * non-null value — but NFIP data is sparse and later rows may omit fields
+ * that happened to be present in the first N rows.
+ */
+const NFIP_CANVAS_SCHEMA: ColumnSchema[] = [
+  { name: 'state', type: 'VARCHAR', nullable: true },
+  { name: 'county_code', type: 'VARCHAR', nullable: true },
+  { name: 'zip_code', type: 'VARCHAR', nullable: true },
+  { name: 'date_of_loss', type: 'VARCHAR', nullable: true },
+  { name: 'year_of_loss', type: 'INTEGER', nullable: true },
+  { name: 'amount_paid_building', type: 'DOUBLE', nullable: true },
+  { name: 'amount_paid_contents', type: 'DOUBLE', nullable: true },
+  { name: 'building_damage_amount', type: 'DOUBLE', nullable: true },
+  { name: 'contents_damage_amount', type: 'DOUBLE', nullable: true },
+  { name: 'rated_flood_zone', type: 'VARCHAR', nullable: true },
+  { name: 'cause_of_damage', type: 'VARCHAR', nullable: true },
+  { name: 'occupancy_type', type: 'INTEGER', nullable: true },
+];
 
 export const femaSearchNfip = tool('fema_search_nfip', {
   title: 'Search NFIP Flood Insurance Claims',
@@ -130,7 +152,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
                 'Primary cause of the flood damage (e.g., "Flooding", "Tidal Overflow"). Absent when not recorded.',
               ),
             occupancy_type: z
-              .string()
+              .number()
               .optional()
               .describe(
                 'NFIP occupancy type code (e.g., 1=Single Family, 2=2-4 Family, 6=Non-Residential). Absent when not recorded.',
@@ -213,24 +235,60 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       ctx,
     );
 
-    const rows = rawRows.map((r) => ({
-      ...(r.state ? { state: r.state } : {}),
-      ...(r.countyCode ? { county_code: r.countyCode } : {}),
-      ...(r.reportedZipCode ? { zip_code: r.reportedZipCode } : {}),
-      ...(r.dateOfLoss ? { date_of_loss: r.dateOfLoss } : {}),
-      ...(r.yearOfLoss != null ? { year_of_loss: r.yearOfLoss } : {}),
-      ...(r.amountPaidOnBuildingClaim != null
-        ? { amount_paid_building: r.amountPaidOnBuildingClaim }
-        : {}),
-      ...(r.amountPaidOnContentsClaim != null
-        ? { amount_paid_contents: r.amountPaidOnContentsClaim }
-        : {}),
-      ...(r.buildingDamageAmount != null ? { building_damage_amount: r.buildingDamageAmount } : {}),
-      ...(r.contentsDamageAmount != null ? { contents_damage_amount: r.contentsDamageAmount } : {}),
-      ...(r.ratedFloodZone ? { rated_flood_zone: r.ratedFloodZone } : {}),
-      ...(r.causeOfDamage ? { cause_of_damage: r.causeOfDamage } : {}),
-      ...(r.occupancyType ? { occupancy_type: r.occupancyType } : {}),
+    // Canvas rows use explicit null for every field so DuckDB schema inference (based on
+    // the first N sniff rows) treats every column as nullable. Omitting a field from the spread
+    // causes DuckDB to infer NOT NULL when the field happens to be non-null in the sniff window —
+    // later rows missing that field then fail the constraint.
+    type CanvasRow = {
+      state: string | null;
+      county_code: string | null;
+      zip_code: string | null;
+      date_of_loss: string | null;
+      year_of_loss: number | null;
+      amount_paid_building: number | null;
+      amount_paid_contents: number | null;
+      building_damage_amount: number | null;
+      contents_damage_amount: number | null;
+      rated_flood_zone: string | null;
+      cause_of_damage: string | null;
+      occupancy_type: number | null;
+    };
+    const rows: CanvasRow[] = rawRows.map((r) => ({
+      state: r.state ?? null,
+      county_code: r.countyCode ?? null,
+      zip_code: r.reportedZipCode ?? null,
+      date_of_loss: r.dateOfLoss ?? null,
+      year_of_loss: r.yearOfLoss ?? null,
+      amount_paid_building: r.amountPaidOnBuildingClaim ?? null,
+      amount_paid_contents: r.amountPaidOnContentsClaim ?? null,
+      building_damage_amount: r.buildingDamageAmount ?? null,
+      contents_damage_amount: r.contentsDamageAmount ?? null,
+      rated_flood_zone: r.ratedFloodZone ?? null,
+      cause_of_damage: r.causeOfDamage ?? null,
+      occupancy_type: r.occupancyType ?? null,
     }));
+
+    /** Convert canvas rows (null fields) to the output schema shape (absent fields). */
+    function toOutputRows(canvasRows: CanvasRow[]) {
+      return canvasRows.map((r) => ({
+        ...(r.state != null ? { state: r.state } : {}),
+        ...(r.county_code != null ? { county_code: r.county_code } : {}),
+        ...(r.zip_code != null ? { zip_code: r.zip_code } : {}),
+        ...(r.date_of_loss != null ? { date_of_loss: r.date_of_loss } : {}),
+        ...(r.year_of_loss != null ? { year_of_loss: r.year_of_loss } : {}),
+        ...(r.amount_paid_building != null ? { amount_paid_building: r.amount_paid_building } : {}),
+        ...(r.amount_paid_contents != null ? { amount_paid_contents: r.amount_paid_contents } : {}),
+        ...(r.building_damage_amount != null
+          ? { building_damage_amount: r.building_damage_amount }
+          : {}),
+        ...(r.contents_damage_amount != null
+          ? { contents_damage_amount: r.contents_damage_amount }
+          : {}),
+        ...(r.rated_flood_zone != null ? { rated_flood_zone: r.rated_flood_zone } : {}),
+        ...(r.cause_of_damage != null ? { cause_of_damage: r.cause_of_damage } : {}),
+        ...(r.occupancy_type != null ? { occupancy_type: r.occupancy_type } : {}),
+      }));
+    }
 
     // Try canvas spillover if available
     const canvas = getCanvas();
@@ -239,6 +297,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       const result = await spillover({
         canvas: instance,
         source: rows,
+        schema: NFIP_CANVAS_SCHEMA,
         previewChars: PREVIEW_CHARS,
         caps: { maxRows: MAX_CANVAS_ROWS },
         signal: ctx.signal,
@@ -254,7 +313,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
           rowCount: result.handle.rowCount,
         });
         return {
-          claims: result.previewRows as (typeof rows)[0][],
+          claims: toOutputRows(result.previewRows as CanvasRow[]),
           total_count: count,
           returned_count: result.previewRows.length,
           canvas_id: instance.canvasId,
@@ -267,7 +326,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       // Fits in preview — still surface canvas_id for potential follow-up queries
       ctx.log.info('NFIP claims fit inline', { rowCount: result.previewRows.length, count });
       return {
-        claims: result.previewRows as (typeof rows)[0][],
+        claims: toOutputRows(result.previewRows as CanvasRow[]),
         total_count: count,
         returned_count: result.previewRows.length,
         canvas_id: instance.canvasId,
@@ -285,7 +344,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     }
 
     return {
-      claims: rows,
+      claims: toOutputRows(rows),
       total_count: count,
       returned_count: rows.length,
       spilled: false,

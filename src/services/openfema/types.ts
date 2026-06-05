@@ -3,8 +3,8 @@
  * @module services/openfema/types
  */
 
-/** Raw OpenFEMA response envelope (metadata at root, not nested). */
-export interface OpenFemaEnvelope {
+/** Metadata block nested inside the OpenFEMA response envelope. */
+export interface OpenFemaMetadata {
   /** Total matching count — only populated when $inlinecount=allpages was sent. */
   count: number;
   entityname: string;
@@ -18,7 +18,13 @@ export interface OpenFemaEnvelope {
   top: number;
   url: string;
   version: string;
-  /** The entity data array — key matches entityname. */
+}
+
+/** Raw OpenFEMA response envelope. Metadata fields are nested under `metadata`. */
+export interface OpenFemaEnvelope {
+  /** Metadata block — count, pagination, and request context. */
+  metadata: OpenFemaMetadata;
+  /** The entity data array — key matches entityname (e.g. "DisasterDeclarationsSummaries"). */
   [entityName: string]: unknown;
 }
 
@@ -64,7 +70,6 @@ export interface RawDisasterDeclaration {
   paProgramDeclared?: boolean;
   placeCode?: string;
   state?: string;
-  stateName?: string;
 }
 
 /** A public assistance funded project row. */
@@ -87,7 +92,7 @@ export interface RawPaProject {
   projectProcessStep?: string;
   projectSize?: string;
   projectStatus?: string;
-  pwNumber?: string;
+  pwNumber?: number;
   stateAbbreviation?: string;
   stateNumberCode?: string;
   totalObligated?: number;
@@ -133,7 +138,7 @@ export interface RawNfipClaim {
   hash?: string;
   id?: string;
   lastRefresh?: string;
-  occupancyType?: string;
+  occupancyType?: number;
   ratedFloodZone?: string;
   reportedZipCode?: string;
   state?: string;

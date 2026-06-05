@@ -140,8 +140,9 @@ export class OpenFemaService {
 
         // Data array is keyed by entityName (e.g. "DisasterDeclarationsSummaries")
         const rows = (envelope[dataset] as T[] | undefined) ?? [];
-        // count is at root, not envelope.metadata.count — only populated with $inlinecount=allpages
-        const count = typeof envelope.count === 'number' ? envelope.count : rows.length;
+        // count is in envelope.metadata.count when $inlinecount=allpages is sent
+        const count =
+          typeof envelope.metadata?.count === 'number' ? envelope.metadata.count : rows.length;
 
         ctx.log.debug('OpenFEMA fetch complete', { dataset, count, rows: rows.length });
         return { rows, count };

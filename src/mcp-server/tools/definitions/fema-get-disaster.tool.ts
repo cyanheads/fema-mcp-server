@@ -28,10 +28,6 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       .describe('FEMA disaster number — use as the chain key for PA and housing assistance tools.'),
     title: z.string().describe('Official declaration title (e.g., "SEVERE STORMS AND FLOODING").'),
     state: z.string().describe('Two-letter state/territory code.'),
-    state_name: z
-      .string()
-      .optional()
-      .describe('Full state or territory name. Absent when not returned by the API.'),
     incident_type: z.string().describe('Type of incident (e.g., Flood, Hurricane, Severe Storm).'),
     declaration_type: z
       .string()
@@ -89,7 +85,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       {
         filter: `disasterNumber eq ${input.disaster_number}`,
         select:
-          'disasterNumber,declarationTitle,state,stateName,incidentType,declarationType,' +
+          'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
           'iaProgramDeclared,paProgramDeclared,hmProgramDeclared,' +
           'designatedArea,fipsStateCode,fipsCountyCode',
@@ -123,7 +119,6 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       disaster_number: first.disasterNumber ?? input.disaster_number,
       title: first.declarationTitle ?? 'Unknown',
       state: first.state ?? '',
-      ...(first.stateName ? { state_name: first.stateName } : {}),
       incident_type: first.incidentType ?? '',
       declaration_type: first.declarationType ?? '',
       declaration_date: first.declarationDate ?? '',
@@ -140,7 +135,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(`# DR-${result.disaster_number} — ${result.title}`);
-    const stateLabel = result.state_name ? `${result.state_name} (${result.state})` : result.state;
+    const stateLabel = result.state;
     lines.push(
       `**State:** ${stateLabel} | **Type:** ${result.declaration_type} | **Incident:** ${result.incident_type}`,
     );

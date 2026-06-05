@@ -55,23 +55,18 @@ describe('femaDisasterResource', () => {
     const ctx = createMockContext();
     const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
     const result = await femaDisasterResource.handler(params, ctx);
-    expect(result.contents).toHaveLength(1);
-    const content = result.contents[0]!;
-    expect(content.uri).toBe('fema://disaster/4781');
-    expect(content.mimeType).toBe('application/json');
-    const parsed = JSON.parse(content.text as string) as Record<string, unknown>;
-    expect(parsed).toMatchObject({
+    expect(result).toMatchObject({
       disaster_number: 4781,
       title: 'HURRICANE HELENE',
       state: 'TX',
       incident_type: 'Hurricane',
     });
     // designated_area_count should reflect the number of rows (2 area rows)
-    expect(parsed.designated_area_count).toBe(2);
+    expect(result.designated_area_count).toBe(2);
     // programs_declared should include IA and PA
-    expect(parsed.programs_declared).toContain('IA');
-    expect(parsed.programs_declared).toContain('PA');
-    expect(parsed.programs_declared).not.toContain('HM');
+    expect(result.programs_declared).toContain('IA');
+    expect(result.programs_declared).toContain('PA');
+    expect(result.programs_declared).not.toContain('HM');
   });
 
   it('throws NotFound for an invalid (non-numeric) disaster number', async () => {
@@ -106,11 +101,10 @@ describe('femaDisasterResource', () => {
     const ctx = createMockContext();
     const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
     const result = await femaDisasterResource.handler(params, ctx);
-    const parsed = JSON.parse(result.contents[0]!.text as string) as Record<string, unknown>;
-    expect(parsed.title).toBe('SPARSE EVENT');
-    expect(parsed.state_name).toBeUndefined();
-    expect(parsed.incident_begin_date).toBeUndefined();
+    expect(result.title).toBe('SPARSE EVENT');
+    expect((result as Record<string, unknown>).state_name).toBeUndefined();
+    expect(result.incident_begin_date).toBeUndefined();
     // programs_declared should be an empty array
-    expect(parsed.programs_declared).toEqual([]);
+    expect(result.programs_declared).toEqual([]);
   });
 });

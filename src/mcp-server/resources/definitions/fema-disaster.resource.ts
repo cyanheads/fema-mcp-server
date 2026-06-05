@@ -35,7 +35,7 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
       {
         filter: `disasterNumber eq ${num}`,
         select:
-          'disasterNumber,declarationTitle,state,stateName,incidentType,declarationType,' +
+          'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
           'iaProgramDeclared,paProgramDeclared,hmProgramDeclared',
         top: 500,
@@ -58,7 +58,6 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
       disaster_number: first.disasterNumber ?? num,
       title: first.declarationTitle ?? 'Unknown',
       state: first.state ?? '',
-      state_name: first.stateName,
       incident_type: first.incidentType ?? '',
       declaration_type: first.declarationType ?? '',
       declaration_date: first.declarationDate ?? '',
@@ -70,14 +69,6 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
 
     ctx.log.info('Disaster resource fetched', { disasterNumber: num });
 
-    return {
-      contents: [
-        {
-          uri: `fema://disaster/${num}`,
-          mimeType: 'application/json',
-          text: JSON.stringify(summary, null, 2),
-        },
-      ],
-    };
+    return summary;
   },
 });

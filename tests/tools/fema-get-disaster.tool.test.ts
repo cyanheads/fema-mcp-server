@@ -64,7 +64,6 @@ describe('femaGetDisaster', () => {
     expect(result.disaster_number).toBe(4781);
     expect(result.title).toBe('HURRICANE HELENE');
     expect(result.state).toBe('TX');
-    expect(result.state_name).toBe('Texas');
     expect(result.designated_areas).toHaveLength(2);
     expect(result.designated_area_count).toBe(2);
     expect(result.ia_declared).toBe(true);

@@ -46,7 +46,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
           .object({
             disaster_number: z.number().describe('FEMA disaster number this project belongs to.'),
             pw_number: z
-              .string()
+              .number()
               .optional()
               .describe('Project Worksheet number assigned by FEMA. Absent when not yet assigned.'),
             applicant_id: z
