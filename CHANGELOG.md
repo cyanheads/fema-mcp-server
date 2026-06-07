@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-06-06
+
+Three API error-handling fixes: Int16 range guard for fema_get_disaster, recovery hint in structuredContent for no-results, sanitized filter error messages
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-06
 
 Public hosted endpoint at https://fema.caseyjhand.com/mcp
