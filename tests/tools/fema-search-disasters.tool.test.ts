@@ -102,6 +102,26 @@ describe('femaSearchDisasters', () => {
     });
   });
 
+  it('includes contextual guidance in recovery hint on no_results', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+    });
+    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
+    const input = femaSearchDisasters.input.parse({ state: 'WY', incident_type: 'Hurricane' });
+    let caught: unknown;
+    try {
+      await femaSearchDisasters.handler(input, ctx);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toMatchObject({
+      data: {
+        reason: 'no_results',
+        recovery: { hint: expect.stringContaining('No disaster declarations matched') },
+      },
+    });
+  });
+
   it('handles sparse upstream rows with missing optional fields', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({

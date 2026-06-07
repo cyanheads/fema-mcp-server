@@ -170,11 +170,11 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     );
 
     if (rows.length === 0) {
-      ctx.enrich.notice(
-        `No Public Assistance projects found for the given filters. Verify the disaster has PA declared via fema_get_disaster.`,
-      );
       throw ctx.fail('no_results', 'No PA project records found.', {
         ...ctx.recoveryFor('no_results'),
+        recovery: {
+          hint: 'No Public Assistance projects found for the given filters. Verify the disaster has PA declared (pa_declared: true via fema_get_disaster) or check the state code. Recent disasters may have incomplete records.',
+        },
       });
     }
 

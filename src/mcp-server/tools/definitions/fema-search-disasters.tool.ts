@@ -292,11 +292,11 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     const declarations = Array.from(disasterMap.values());
 
     if (declarations.length === 0) {
-      ctx.enrich.notice(
-        `No disaster declarations matched the search criteria. Try broadening the date range, removing filters, or checking the state code.`,
-      );
       throw ctx.fail('no_results', 'No disaster declarations matched the query.', {
         ...ctx.recoveryFor('no_results'),
+        recovery: {
+          hint: 'No disaster declarations matched the search criteria. Broaden the search by removing filters, expanding the date range, or trying a different state or incident type.',
+        },
       });
     }
 

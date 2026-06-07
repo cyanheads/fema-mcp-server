@@ -189,12 +189,12 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     const rentersCount = rentersResult?.count ?? 0;
 
     if (ownersData.length === 0 && rentersData.length === 0) {
-      ctx.enrich.notice(
-        `No housing assistance records found for DR-${input.disaster_number}. Verify IA was declared via fema_get_disaster.`,
-      );
       throw ctx.fail('no_results', `No IA housing records for disaster ${input.disaster_number}.`, {
         disasterNumber: input.disaster_number,
         ...ctx.recoveryFor('no_results'),
+        recovery: {
+          hint: `No housing assistance records found for DR-${input.disaster_number}. Check that ia_declared is true for this disaster using fema_get_disaster. IA housing data may take weeks to appear after a declaration.`,
+        },
       });
     }
 
