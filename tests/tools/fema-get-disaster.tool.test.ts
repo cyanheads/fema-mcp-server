@@ -92,6 +92,18 @@ describe('femaGetDisaster', () => {
     });
   });
 
+  it('throws not_found without calling the service when disaster_number > 32767', async () => {
+    const fetchDisastersMock = vi.fn().mockResolvedValue({ rows: [], count: 0 });
+    await setMock({ fetchDisasters: fetchDisastersMock });
+    const ctx = createMockContext({ errors: femaGetDisaster.errors });
+    const input = femaGetDisaster.input.parse({ disaster_number: 32768 });
+    await expect(femaGetDisaster.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'not_found' },
+    });
+    // Guard fires before the API call
+    expect(fetchDisastersMock).not.toHaveBeenCalled();
+  });
+
   it('handles sparse rows (missing optional dates)', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({

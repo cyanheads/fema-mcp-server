@@ -118,7 +118,15 @@ export class OpenFemaService {
             if (errBody.error?.[0]) {
               const e = errBody.error[0];
               if (response.status === 400) {
-                throw invalidParams(`OpenFEMA query error [${e.code}]: ${e.message}`, {
+                // Sanitize the API error before surfacing it. The raw message may contain
+                // internal parser offsets ("at 469"), undefined error codes, and schema
+                // type details (Int16, Byte) that are not actionable for callers. Produce
+                // a clean message based on the error pattern.
+                const rawMsg = e.message ?? '';
+                const cleanMessage = /expected to be one of.*(?:Byte|Int16|SByte)/i.test(rawMsg)
+                  ? 'Disaster number is outside the valid FEMA range (1–32767).'
+                  : "Invalid OData $filter expression. String values must use single quotes; field names are case-sensitive. Example: state eq 'TX' and declarationDate ge '2024-01-01T00:00:00.000Z'";
+                throw invalidParams(cleanMessage, {
                   reason: 'invalid_filter',
                   code: e.code,
                   name: e.name,

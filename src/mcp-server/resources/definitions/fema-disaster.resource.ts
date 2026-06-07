@@ -29,6 +29,11 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
         { disasterNumber: params.disasterNumber },
       );
     }
+    // OpenFEMA's OData layer stores disasterNumber as Int16 (max 32767).
+    // Numbers above that produce a raw type-mismatch API error — treat as not-found.
+    if (num > 32767) {
+      throw notFound(`Disaster number ${num} not found in FEMA records.`, { disasterNumber: num });
+    }
 
     const svc = getOpenFemaService();
     const { rows } = await svc.fetchDisasters(

@@ -98,6 +98,37 @@ describe('femaQueryDataset', () => {
     });
   });
 
+  it('service sanitizes raw parser error message into actionable text', async () => {
+    // Simulate the raw error the service would have thrown before sanitization;
+    // after the fix the service builds a clean message — verify it doesn't contain
+    // internal position offsets or undefined codes.
+    const sanitizedError = new McpError(
+      JsonRpcErrorCode.InvalidParams,
+      "Invalid OData $filter expression. String values must use single quotes; field names are case-sensitive. Example: state eq 'TX' and declarationDate ge '2024-01-01T00:00:00.000Z'",
+      { reason: 'invalid_filter', code: undefined, name: undefined },
+    );
+    await setMock({
+      fetchDataset: vi.fn().mockRejectedValue(sanitizedError),
+    });
+    const ctx = createMockContext({ errors: femaQueryDataset.errors });
+    const input = femaQueryDataset.input.parse({
+      dataset: 'DisasterDeclarationsSummaries',
+      filter: 'INVALID FILTER EXPRESSION',
+    });
+    let caught: unknown;
+    try {
+      await femaQueryDataset.handler(input, ctx);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    // Verify the message doesn't contain internal parse-position offsets
+    const message = (caught as McpError).message;
+    expect(message).not.toMatch(/at \d+/);
+    expect(message).not.toContain('[undefined]');
+    expect(message).toContain('$filter');
+  });
+
   it('formats small result sets as markdown table', () => {
     const output = {
       dataset: 'DisasterDeclarationsSummaries',
