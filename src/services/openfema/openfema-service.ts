@@ -6,7 +6,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { invalidParams, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { notFound, serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
@@ -126,7 +126,7 @@ export class OpenFemaService {
                 const cleanMessage = /expected to be one of.*(?:Byte|Int16|SByte)/i.test(rawMsg)
                   ? 'Disaster number is outside the valid FEMA range (1–32767).'
                   : "Invalid OData $filter expression. String values must use single quotes; field names are case-sensitive. Example: state eq 'TX' and declarationDate ge '2024-01-01T00:00:00.000Z'";
-                throw invalidParams(cleanMessage, {
+                throw validationError(cleanMessage, {
                   reason: 'invalid_filter',
                   code: e.code,
                   name: e.name,

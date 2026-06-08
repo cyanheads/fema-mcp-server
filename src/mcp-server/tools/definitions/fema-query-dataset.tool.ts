@@ -79,7 +79,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
     },
     {
       reason: 'invalid_filter',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'OData filter expression could not be parsed by the API.',
       recovery:
         'Fix the OData $filter syntax. String values must use single quotes. Check field names against the dataset schema at the FEMA OpenFEMA portal.',

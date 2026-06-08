@@ -51,7 +51,7 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
     },
     {
       reason: 'invalid_query',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL statement is not a valid SELECT, references a non-existent table or column, or uses blocked operations.',
       recovery:
         'Call fema_dataframe_describe to verify table and column names, then correct the SQL. Only SELECT statements are permitted.',

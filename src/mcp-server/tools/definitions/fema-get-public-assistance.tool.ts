@@ -126,7 +126,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   errors: [
     {
       reason: 'missing_filter',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Neither disaster_number nor state was provided.',
       recovery:
         'Provide at least one of disaster_number (from fema_search_disasters) or state (2-letter code) to scope the query.',

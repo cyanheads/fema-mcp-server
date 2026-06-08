@@ -200,7 +200,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
   errors: [
     {
       reason: 'invalid_state',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The state parameter is not a valid 2-letter US state/territory code.',
       recovery:
         'Provide a valid 2-letter US state code such as TX, CA, FL, or PR. Check the full list at FEMA.gov.',
