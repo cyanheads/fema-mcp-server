@@ -43,7 +43,9 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       .describe('ISO 8601 end date of the incident. Absent for ongoing or unrecorded incidents.'),
     ia_declared: z
       .boolean()
-      .describe('True when Individual Assistance (housing/personal grants) was declared.'),
+      .describe(
+        'True when the Individuals and Households Program (IHP) was declared — indicates IA housing/personal grants are available.',
+      ),
     pa_declared: z
       .boolean()
       .describe('True when Public Assistance (infrastructure recovery grants) was declared.'),
@@ -99,7 +101,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
         select:
           'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
-          'iaProgramDeclared,paProgramDeclared,hmProgramDeclared,' +
+          'ihProgramDeclared,paProgramDeclared,hmProgramDeclared,' +
           'designatedArea,fipsStateCode,fipsCountyCode',
         top: 1000,
       },
@@ -122,6 +124,12 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       ...(r.fipsCountyCode ? { fips_county_code: r.fipsCountyCode } : {}),
     }));
 
+    // OR program flags across all area-rows: ihProgramDeclared may be false on some
+    // rows and true on others for the same disaster — declared for ANY area = declared.
+    const ia_declared = rows.some((r) => r.ihProgramDeclared === true);
+    const pa_declared = rows.some((r) => r.paProgramDeclared === true);
+    const hm_declared = rows.some((r) => r.hmProgramDeclared === true);
+
     ctx.log.info('Disaster fetch complete', {
       disasterNumber: input.disaster_number,
       areaCount: designatedAreas.length,
@@ -136,9 +144,9 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       declaration_date: first.declarationDate ?? '',
       ...(first.incidentBeginDate ? { incident_begin_date: first.incidentBeginDate } : {}),
       ...(first.incidentEndDate ? { incident_end_date: first.incidentEndDate } : {}),
-      ia_declared: first.iaProgramDeclared ?? false,
-      pa_declared: first.paProgramDeclared ?? false,
-      hm_declared: first.hmProgramDeclared ?? false,
+      ia_declared,
+      pa_declared,
+      hm_declared,
       designated_areas: designatedAreas,
       designated_area_count: designatedAreas.length,
     };

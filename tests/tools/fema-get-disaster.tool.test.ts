@@ -34,7 +34,7 @@ function makeAreaRow(overrides: Record<string, unknown> = {}) {
     declarationDate: '2024-09-27T00:00:00.000Z',
     incidentBeginDate: '2024-09-26T00:00:00.000Z',
     incidentEndDate: '2024-09-28T00:00:00.000Z',
-    iaProgramDeclared: true,
+    ihProgramDeclared: true, // IHP flag (correct); iaProgramDeclared is legacy/false for major disasters
     paProgramDeclared: true,
     hmProgramDeclared: false,
     designatedArea: 'Harris County',
@@ -68,6 +68,44 @@ describe('femaGetDisaster', () => {
     expect(result.designated_area_count).toBe(2);
     expect(result.ia_declared).toBe(true);
     expect(result.pa_declared).toBe(true);
+  });
+
+  it('ia_declared reflects ihProgramDeclared (IHP flag), not iaProgramDeclared', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeAreaRow({
+            ihProgramDeclared: true,
+            iaProgramDeclared: false, // legacy flag — should NOT be used
+          }),
+        ],
+        count: 1,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaGetDisaster.errors });
+    const input = femaGetDisaster.input.parse({ disaster_number: 4781 });
+    const result = await femaGetDisaster.handler(input, ctx);
+    expect(result.ia_declared).toBe(true);
+  });
+
+  it('ia_declared is true when any area row has ihProgramDeclared true (OR rollup)', async () => {
+    // Some rows may have ihProgramDeclared: false even though the disaster has IHP declared.
+    // The rollup must OR across all rows, not take the first row's value.
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeAreaRow({ ihProgramDeclared: false }), // first row is false
+          makeAreaRow({ ihProgramDeclared: false, designatedArea: 'Bexar County' }),
+          makeAreaRow({ ihProgramDeclared: true, designatedArea: 'Travis County' }), // later row is true
+        ],
+        count: 3,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaGetDisaster.errors });
+    const input = femaGetDisaster.input.parse({ disaster_number: 4781 });
+    const result = await femaGetDisaster.handler(input, ctx);
+    expect(result.ia_declared).toBe(true);
+    expect(result.designated_area_count).toBe(3);
   });
 
   it('includes FIPS codes when present', async () => {

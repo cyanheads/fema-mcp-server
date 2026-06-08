@@ -14,7 +14,6 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     'Returns owner and/or renter breakdowns by county and ZIP code — valid registrations, ' +
     'total approved IHP amounts, repair/rental amounts, and inspection data. ' +
     'Use type to select owners, renters, or both (default). ' +
-    'IA housing data is only available when ia_declared: true on the disaster (check via fema_get_disaster). ' +
     'Use disaster_number from fema_search_disasters.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
@@ -155,7 +154,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No IA housing records found for this disaster.',
       recovery:
-        'Check that ia_declared is true for this disaster using fema_get_disaster. IA housing data may take weeks to appear after a declaration.',
+        'IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.',
     },
   ],
 
@@ -193,7 +192,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
         disasterNumber: input.disaster_number,
         ...ctx.recoveryFor('no_results'),
         recovery: {
-          hint: `No housing assistance records found for DR-${input.disaster_number}. Check that ia_declared is true for this disaster using fema_get_disaster. IA housing data may take weeks to appear after a declaration.`,
+          hint: `No housing assistance records found for DR-${input.disaster_number}. IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.`,
         },
       });
     }

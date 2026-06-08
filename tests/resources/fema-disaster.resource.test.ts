@@ -34,7 +34,7 @@ function makeDisasterRow(overrides: Record<string, unknown> = {}) {
     declarationDate: '2024-09-27T00:00:00.000Z',
     incidentBeginDate: '2024-09-26T00:00:00.000Z',
     incidentEndDate: '2024-09-28T00:00:00.000Z',
-    iaProgramDeclared: true,
+    ihProgramDeclared: true, // IHP flag (correct); iaProgramDeclared is legacy/false for major disasters
     paProgramDeclared: true,
     hmProgramDeclared: false,
     ...overrides,
@@ -67,6 +67,44 @@ describe('femaDisasterResource', () => {
     expect(result.programs_declared).toContain('IA');
     expect(result.programs_declared).toContain('PA');
     expect(result.programs_declared).not.toContain('HM');
+  });
+
+  it('programs_declared uses ihProgramDeclared (IHP flag), not iaProgramDeclared', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeDisasterRow({
+            ihProgramDeclared: true,
+            iaProgramDeclared: false, // legacy flag — should NOT drive IA in programs_declared
+          }),
+        ],
+        count: 1,
+      }),
+    });
+    const ctx = createMockContext();
+    const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
+    const result = await femaDisasterResource.handler(params, ctx);
+    expect(result.programs_declared).toContain('IA');
+  });
+
+  it('programs_declared ORs ihProgramDeclared across all area rows', async () => {
+    // First row has ihProgramDeclared: false; a later row has true.
+    // Result must contain IA regardless of row order.
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeDisasterRow({ ihProgramDeclared: false }),
+          makeDisasterRow({ ihProgramDeclared: false }),
+          makeDisasterRow({ ihProgramDeclared: true }),
+        ],
+        count: 3,
+      }),
+    });
+    const ctx = createMockContext();
+    const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
+    const result = await femaDisasterResource.handler(params, ctx);
+    expect(result.programs_declared).toContain('IA');
+    expect(result.designated_area_count).toBe(3);
   });
 
   it('throws NotFound for an invalid (non-numeric) disaster number', async () => {

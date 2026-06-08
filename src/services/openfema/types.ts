@@ -63,6 +63,7 @@ export interface RawDisasterDeclaration {
   iaProgramDeclared?: boolean;
   id?: string;
   ihmProgramDeclared?: boolean;
+  ihProgramDeclared?: boolean;
   incidentBeginDate?: string;
   incidentEndDate?: string;
   incidentType?: string;

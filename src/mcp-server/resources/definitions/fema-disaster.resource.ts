@@ -42,7 +42,7 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
         select:
           'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
-          'iaProgramDeclared,paProgramDeclared,hmProgramDeclared',
+          'ihProgramDeclared,paProgramDeclared,hmProgramDeclared',
         top: 500,
       },
       ctx,
@@ -54,10 +54,11 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
 
     // biome-ignore lint/style/noNonNullAssertion: rows.length === 0 checked above via notFound throw
     const first = rows[0]!;
+    // OR program flags across all area-rows: declared for ANY area = declared for the disaster.
     const programs: string[] = [];
-    if (first.iaProgramDeclared) programs.push('IA');
-    if (first.paProgramDeclared) programs.push('PA');
-    if (first.hmProgramDeclared) programs.push('HM');
+    if (rows.some((r) => r.ihProgramDeclared === true)) programs.push('IA');
+    if (rows.some((r) => r.paProgramDeclared === true)) programs.push('PA');
+    if (rows.some((r) => r.hmProgramDeclared === true)) programs.push('HM');
 
     const summary = {
       disaster_number: first.disasterNumber ?? num,
