@@ -20,7 +20,7 @@ vi.mock('@/services/openfema/openfema-service.js', () => {
   };
 });
 
-/** Minimal disaster row fixture. */
+/** Minimal disaster row fixture. Uses ihProgramDeclared (IHP flag), not iaProgramDeclared. */
 function makeDisasterRow(overrides: Record<string, unknown> = {}) {
   return {
     disasterNumber: 4781,
@@ -29,7 +29,7 @@ function makeDisasterRow(overrides: Record<string, unknown> = {}) {
     incidentType: 'Hurricane',
     declarationType: 'DR',
     declarationDate: '2024-09-27T00:00:00.000Z',
-    iaProgramDeclared: true,
+    ihProgramDeclared: true,
     paProgramDeclared: true,
     hmProgramDeclared: false,
     ...overrides,
@@ -66,6 +66,60 @@ describe('femaSearchDisasters', () => {
     expect(result.returned_count).toBe(1);
   });
 
+  it('ia_declared reflects ihProgramDeclared (IHP flag), not iaProgramDeclared', async () => {
+    // iaProgramDeclared is the legacy general-IA flag (false for major disasters since ~2012).
+    // ihProgramDeclared (Individuals & Households Program) is the correct field.
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeDisasterRow({
+            ihProgramDeclared: true,
+            iaProgramDeclared: false, // legacy flag — should NOT be used
+          }),
+        ],
+        count: 1,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
+    const input = femaSearchDisasters.input.parse({});
+    const result = await femaSearchDisasters.handler(input, ctx);
+    expect(result.declarations[0]?.ia_declared).toBe(true);
+  });
+
+  it('ia_declared is false when ihProgramDeclared is false on all areas', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [makeDisasterRow({ ihProgramDeclared: false })],
+        count: 1,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
+    const input = femaSearchDisasters.input.parse({});
+    const result = await femaSearchDisasters.handler(input, ctx);
+    expect(result.declarations[0]?.ia_declared).toBe(false);
+  });
+
+  it('ia_declared is true when any area row has ihProgramDeclared true (OR rollup)', async () => {
+    // OpenFEMA may return ihProgramDeclared: false rows first (sort order), followed by true.
+    // The rollup must OR across all rows, not take the first row's value.
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeDisasterRow({ ihProgramDeclared: false }), // first row is false
+          makeDisasterRow({ ihProgramDeclared: false }),
+          makeDisasterRow({ ihProgramDeclared: true }), // later row is true
+        ],
+        count: 3,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
+    const input = femaSearchDisasters.input.parse({});
+    const result = await femaSearchDisasters.handler(input, ctx);
+    expect(result.declarations[0]?.ia_declared).toBe(true);
+    // all 3 area rows for the same disaster
+    expect(result.declarations[0]?.designated_area_count).toBe(3);
+  });
+
   it('deduplicates multiple area rows for the same disaster number', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({
@@ -81,6 +135,51 @@ describe('femaSearchDisasters', () => {
     const dr4781 = result.declarations.find((d) => d.disaster_number === 4781);
     expect(dr4781?.designated_area_count).toBe(2);
     expect(result.total_area_rows).toBe(50);
+  });
+
+  it('limit/offset apply to deduplicated declarations, not area-rows', async () => {
+    // 5 area-rows spanning 3 disasters: 4780 (3 areas), 4781 (1 area), 4782 (1 area).
+    // With limit=2 offset=0 we expect exactly 2 DISTINCT declarations.
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeDisasterRow({ disasterNumber: 4780 }),
+          makeDisasterRow({ disasterNumber: 4780 }),
+          makeDisasterRow({ disasterNumber: 4780 }),
+          makeDisasterRow({ disasterNumber: 4781 }),
+          makeDisasterRow({ disasterNumber: 4782 }),
+        ],
+        count: 5,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
+    const input = femaSearchDisasters.input.parse({ limit: 2, offset: 0 });
+    const result = await femaSearchDisasters.handler(input, ctx);
+    // limit=2 should return 2 distinct declarations, not fewer
+    expect(result.declarations).toHaveLength(2);
+    expect(result.returned_count).toBe(2);
+    // DR-4780 should show all 3 of its area-rows as designated_area_count
+    const dr4780 = result.declarations.find((d) => d.disaster_number === 4780);
+    expect(dr4780?.designated_area_count).toBe(3);
+  });
+
+  it('offset paginates across declarations', async () => {
+    // 3 distinct disasters; offset=2 should return only the third
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeDisasterRow({ disasterNumber: 4780 }),
+          makeDisasterRow({ disasterNumber: 4781 }),
+          makeDisasterRow({ disasterNumber: 4782 }),
+        ],
+        count: 3,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
+    const input = femaSearchDisasters.input.parse({ limit: 10, offset: 2 });
+    const result = await femaSearchDisasters.handler(input, ctx);
+    expect(result.declarations).toHaveLength(1);
+    expect(result.declarations[0]?.disaster_number).toBe(4782);
   });
 
   it('throws invalid_state for unknown state codes', async () => {

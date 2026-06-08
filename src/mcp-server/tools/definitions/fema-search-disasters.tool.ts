@@ -121,13 +121,15 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       .min(1)
       .max(1000)
       .default(50)
-      .describe('Maximum number of declarations to return (1–1000, default 50).'),
+      .describe('Maximum number of unique disaster declarations to return (1–1000, default 50).'),
     offset: z
       .number()
       .int()
       .min(0)
       .default(0)
-      .describe('Pagination offset (default 0). Use with limit for paging through results.'),
+      .describe(
+        'Pagination offset in declarations (default 0). Use with limit to page through results.',
+      ),
   }),
   output: z.object({
     declarations: z
@@ -162,7 +164,9 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
               .describe('ISO 8601 incident end date. Absent for ongoing or unrecorded incidents.'),
             ia_declared: z
               .boolean()
-              .describe('True when Individual Assistance (housing/personal grants) was declared.'),
+              .describe(
+                'True when the Individuals and Households Program (IHP) was declared — indicates IA housing/personal grants are available.',
+              ),
             pa_declared: z
               .boolean()
               .describe(
@@ -181,9 +185,10 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     total_area_rows: z
       .number()
       .describe(
-        'Total matching designated-area rows from the API before pagination. ' +
-          'DisasterDeclarationsSummaries returns one row per designated area per disaster — ' +
-          'this count is higher than the number of unique declarations in `declarations`.',
+        'Total matching designated-area rows from the API (raw row count, not declaration count). ' +
+          'DisasterDeclarationsSummaries returns one row per designated area per disaster, ' +
+          'so this is always ≥ the number of unique declarations. ' +
+          'When total_area_rows exceeds 10 000, results are truncated to the most recent 10 000 rows — apply tighter filters to stay within this window.',
       ),
     returned_count: z
       .number()
@@ -233,21 +238,28 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     }
 
     const svc = getOpenFemaService();
+    // Overfetch all matching area-rows so we can dedup to declaration-level
+    // before applying limit/offset. OpenFEMA's DisasterDeclarationsSummaries
+    // returns one row per designated area per disaster, so passing limit/offset
+    // directly as $top/$skip skips area-rows — not declarations — producing
+    // undercounts and split declarations across pages. A cap of 10 000 rows
+    // covers hundreds of declared disasters while keeping response times reasonable.
+    const OVERFETCH_CAP = 10_000;
     const { rows, count } = await svc.fetchDisasters(
       {
         ...(filterParts.length > 0 ? { filter: filterParts.join(' and ') } : {}),
         select:
           'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
-          'iaProgramDeclared,paProgramDeclared,hmProgramDeclared',
+          'ihProgramDeclared,paProgramDeclared,hmProgramDeclared',
         orderby: 'declarationDate desc',
-        top: input.limit,
-        skip: input.offset,
+        top: OVERFETCH_CAP,
       },
       ctx,
     );
 
-    // Deduplicate: group rows by disasterNumber, tracking designatedAreaCount
+    // Deduplicate: group all area-rows by disasterNumber, accumulating designatedAreaCount.
+    // The full dedup gives accurate designated_area_count for every disaster in scope.
     const disasterMap = new Map<
       number,
       {
@@ -271,6 +283,10 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       const existing = disasterMap.get(num);
       if (existing) {
         existing.designated_area_count += 1;
+        // OR the IHP flag across all areas: declared for ANY area = declared for the disaster
+        if (row.ihProgramDeclared) existing.ia_declared = true;
+        if (row.paProgramDeclared) existing.pa_declared = true;
+        if (row.hmProgramDeclared) existing.hm_declared = true;
       } else {
         disasterMap.set(num, {
           disaster_number: num,
@@ -281,7 +297,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
           declaration_date: row.declarationDate ?? '',
           ...(row.incidentBeginDate ? { incident_begin_date: row.incidentBeginDate } : {}),
           ...(row.incidentEndDate ? { incident_end_date: row.incidentEndDate } : {}),
-          ia_declared: row.iaProgramDeclared ?? false,
+          ia_declared: row.ihProgramDeclared ?? false,
           pa_declared: row.paProgramDeclared ?? false,
           hm_declared: row.hmProgramDeclared ?? false,
           designated_area_count: 1,
@@ -289,7 +305,12 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       }
     }
 
-    const declarations = Array.from(disasterMap.values());
+    // Slice the deduplicated list to honour the caller's offset/limit — now
+    // applied against declarations, not area-rows.
+    const declarations = Array.from(disasterMap.values()).slice(
+      input.offset,
+      input.offset + input.limit,
+    );
 
     if (declarations.length === 0) {
       throw ctx.fail('no_results', 'No disaster declarations matched the query.', {
