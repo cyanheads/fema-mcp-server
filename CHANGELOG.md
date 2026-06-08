@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-06-08 · 🛡️ Security
+
+ValidationError for domain-validation failures; mcp-ts-core ^0.10.1 (DataCanvas SQL gate hardened, .mcpbignore re-anchored)
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-06-08
 
 Correct ia_declared to use ihProgramDeclared (IHP flag) with OR rollup across area rows; fix limit/offset pagination to operate on deduplicated declarations
