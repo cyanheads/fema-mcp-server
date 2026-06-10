@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-06-10
+
+NFIP canvas now stages the full matching result set; 3-digit county codes normalize to 5-digit FIPS; unknown-dataset errors no longer leak transport detail
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-06-08 · 🛡️ Security
 
 ValidationError for domain-validation failures; mcp-ts-core ^0.10.1 (DataCanvas SQL gate hardened, .mcpbignore re-anchored)
