@@ -73,7 +73,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
     {
       reason: 'unknown_dataset',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Dataset name not recognized — API returned HTML 404 instead of JSON.',
+      when: 'Dataset name not recognized by the OpenFEMA API.',
       recovery:
         'Check the exact dataset entity name at https://www.fema.gov/about/openfema/data-sets. Names are case-sensitive (e.g., FimaNfipClaims not fimaNfipClaims).',
     },

@@ -92,11 +92,22 @@ export class OpenFemaService {
           clearTimeout(timeoutId);
         }
 
-        // HTML content-type = unknown dataset (Drupal 404)
         const contentType = response.headers.get('content-type') ?? '';
-        if (contentType.includes('text/html') || (!response.ok && contentType.includes('html'))) {
+        const isHtmlContentType = contentType.includes('text/html') || contentType.includes('html');
+
+        // 5xx with HTML body = transient upstream error (Drupal 503 under rate-limiting).
+        // Throw serviceUnavailable so withRetry can back off and retry.
+        if (isHtmlContentType && response.status >= 500) {
+          throw serviceUnavailable(
+            `OpenFEMA API returned HTTP ${response.status} for dataset "${dataset}" — possible rate limit. Retry after a short delay.`,
+            { status: response.status, url },
+          );
+        }
+
+        // HTML content-type on a non-5xx (typically 404) = unknown dataset (Drupal error page).
+        if (isHtmlContentType) {
           throw notFound(
-            `Dataset "${dataset}" not found — API returned HTML instead of JSON. Check the dataset name.`,
+            `Dataset "${dataset}" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).`,
             { reason: 'unknown_dataset', dataset },
           );
         }
@@ -105,8 +116,14 @@ export class OpenFemaService {
 
         // Body HTML check as fallback (some error pages send application/json content-type)
         if (isHtmlResponse(text)) {
+          if (response.status >= 500) {
+            throw serviceUnavailable(
+              `OpenFEMA API returned HTTP ${response.status} for dataset "${dataset}" — possible rate limit. Retry after a short delay.`,
+              { status: response.status, url },
+            );
+          }
           throw notFound(
-            `Dataset "${dataset}" not found — API returned HTML instead of JSON. Check the dataset name.`,
+            `Dataset "${dataset}" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).`,
             { reason: 'unknown_dataset', dataset },
           );
         }

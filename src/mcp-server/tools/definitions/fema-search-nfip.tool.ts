@@ -14,6 +14,70 @@ const PREVIEW_CHARS = 100_000;
 const MAX_CANVAS_ROWS = 50_000;
 
 /**
+ * US state abbreviation → 2-digit FIPS code.
+ * Used to normalize a 3-digit county code to the full 5-digit state+county FIPS.
+ * Source: ANSI INCITS 38:2009 (formerly FIPS 5-2).
+ */
+const STATE_FIPS: Record<string, string> = {
+  AL: '01',
+  AK: '02',
+  AZ: '04',
+  AR: '05',
+  CA: '06',
+  CO: '08',
+  CT: '09',
+  DE: '10',
+  DC: '11',
+  FL: '12',
+  GA: '13',
+  HI: '15',
+  ID: '16',
+  IL: '17',
+  IN: '18',
+  IA: '19',
+  KS: '20',
+  KY: '21',
+  LA: '22',
+  ME: '23',
+  MD: '24',
+  MA: '25',
+  MI: '26',
+  MN: '27',
+  MS: '28',
+  MO: '29',
+  MT: '30',
+  NE: '31',
+  NV: '32',
+  NH: '33',
+  NJ: '34',
+  NM: '35',
+  NY: '36',
+  NC: '37',
+  ND: '38',
+  OH: '39',
+  OK: '40',
+  OR: '41',
+  PA: '42',
+  RI: '44',
+  SC: '45',
+  SD: '46',
+  TN: '47',
+  TX: '48',
+  UT: '49',
+  VT: '50',
+  VA: '51',
+  WA: '53',
+  WV: '54',
+  WI: '55',
+  WY: '56',
+  AS: '60',
+  GU: '66',
+  MP: '69',
+  PR: '72',
+  VI: '78',
+};
+
+/**
  * Explicit DuckDB schema for NFIP canvas tables. All fields are nullable to
  * prevent NOT NULL constraint failures during append: the sniff-based schema
  * inference marks a column NOT NULL when every row in the sniff window has a
@@ -58,7 +122,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .string()
       .optional()
       .describe(
-        'County code to narrow results within the state (e.g., 201 for Harris County TX). Use with state.',
+        'County code to narrow results within the state. Accepts the full 5-digit state+county FIPS (e.g., 48201 for Harris County TX) or the 3-digit county portion (e.g., 201) when state is provided — the server prepends the state FIPS automatically.',
       ),
     zip_code: z.string().optional().describe('ZIP code to narrow results to a specific area.'),
     year_from: z
@@ -81,7 +145,10 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .min(1)
       .max(10000)
       .default(1000)
-      .describe('Maximum rows to fetch (1–10000, default 1000).'),
+      .describe(
+        'Maximum claim rows to return in the inline preview (1–10000, default 1000). ' +
+          'When DataCanvas is enabled, the canvas stages the full matching result set regardless of this value.',
+      ),
     canvas_id: z
       .string()
       .optional()
@@ -101,7 +168,9 @@ export const femaSearchNfip = tool('fema_search_nfip', {
             county_code: z
               .string()
               .optional()
-              .describe('County code (e.g., 201 for Harris County TX). Absent when not recorded.'),
+              .describe(
+                '5-digit state+county FIPS code (e.g., 48201 for Harris County TX). Absent when not recorded.',
+              ),
             zip_code: z
               .string()
               .optional()
@@ -170,7 +239,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .string()
       .optional()
       .describe(
-        'Canvas ID for the staged full result set. Pass to fema_dataframe_query and fema_dataframe_describe. Present when canvas is enabled.',
+        'Canvas ID for the staged full result set. Pass to fema_dataframe_query and fema_dataframe_describe. Present only when spilled=true.',
       ),
     canvas_table: z
       .string()
@@ -187,7 +256,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .boolean()
       .optional()
       .describe(
-        'True when the canvas row cap (50,000) was reached before all matching rows were staged. Apply tighter filters (county_code, zip_code, year range) for a complete set.',
+        'True when the canvas row cap (50,000) was reached before the full matching set was staged — the canvas holds a partial result. Apply tighter filters (county_code, zip_code, year range) to stage the complete set.',
       ),
   }),
   enrichment: {
@@ -195,9 +264,19 @@ export const femaSearchNfip = tool('fema_search_nfip', {
   },
 
   async handler(input, ctx) {
+    // Normalize a bare 3-digit county code to the full 5-digit state+county FIPS.
+    // NFIP data stores countyCode as 5-digit FIPS; a 3-digit value silently returns zero rows.
+    let countyCode = input.county_code?.trim() ?? '';
+    if (countyCode.length === 3) {
+      const stateFips = STATE_FIPS[input.state.toUpperCase()];
+      if (stateFips) {
+        countyCode = stateFips + countyCode;
+      }
+    }
+
     const filterParts: string[] = [`state eq '${escapeODataString(input.state)}'`];
-    if (input.county_code?.trim()) {
-      filterParts.push(`countyCode eq '${escapeODataString(input.county_code)}'`);
+    if (countyCode) {
+      filterParts.push(`countyCode eq '${escapeODataString(countyCode)}'`);
     }
     if (input.zip_code?.trim()) {
       filterParts.push(`reportedZipCode eq '${escapeODataString(input.zip_code)}'`);
@@ -210,14 +289,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     }
 
     const svc = getOpenFemaService();
-    const { rows: rawRows, count } = await svc.fetchNfipClaims(
-      {
-        filter: filterParts.join(' and '),
-        orderby: 'dateOfLoss desc',
-        top: input.limit,
-      },
-      ctx,
-    );
+    const filter = filterParts.join(' and ');
 
     // Canvas rows use explicit null for every field so DuckDB schema inference (based on
     // the first N sniff rows) treats every column as nullable. Omitting a field from the spread
@@ -237,20 +309,37 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       cause_of_damage: string | null;
       occupancy_type: number | null;
     };
-    const rows: CanvasRow[] = rawRows.map((r) => ({
-      state: r.state ?? null,
-      county_code: r.countyCode ?? null,
-      zip_code: r.reportedZipCode ?? null,
-      date_of_loss: r.dateOfLoss ?? null,
-      year_of_loss: r.yearOfLoss ?? null,
-      amount_paid_building: r.amountPaidOnBuildingClaim ?? null,
-      amount_paid_contents: r.amountPaidOnContentsClaim ?? null,
-      building_damage_amount: r.buildingDamageAmount ?? null,
-      contents_damage_amount: r.contentsDamageAmount ?? null,
-      rated_flood_zone: r.ratedFloodZone ?? null,
-      cause_of_damage: r.causeOfDamage ?? null,
-      occupancy_type: r.occupancyType ?? null,
-    }));
+
+    /** Map a raw API row to a canvas row (all fields explicitly null when absent). */
+    function toCanvasRow(r: {
+      state?: string;
+      countyCode?: string;
+      reportedZipCode?: string;
+      dateOfLoss?: string;
+      yearOfLoss?: number;
+      amountPaidOnBuildingClaim?: number;
+      amountPaidOnContentsClaim?: number;
+      buildingDamageAmount?: number;
+      contentsDamageAmount?: number;
+      ratedFloodZone?: string;
+      causeOfDamage?: string;
+      occupancyType?: number;
+    }): CanvasRow {
+      return {
+        state: r.state ?? null,
+        county_code: r.countyCode ?? null,
+        zip_code: r.reportedZipCode ?? null,
+        date_of_loss: r.dateOfLoss ?? null,
+        year_of_loss: r.yearOfLoss ?? null,
+        amount_paid_building: r.amountPaidOnBuildingClaim ?? null,
+        amount_paid_contents: r.amountPaidOnContentsClaim ?? null,
+        building_damage_amount: r.buildingDamageAmount ?? null,
+        contents_damage_amount: r.contentsDamageAmount ?? null,
+        rated_flood_zone: r.ratedFloodZone ?? null,
+        cause_of_damage: r.causeOfDamage ?? null,
+        occupancy_type: r.occupancyType ?? null,
+      };
+    }
 
     /** Convert canvas rows (null fields) to the output schema shape (absent fields). */
     function toOutputRows(canvasRows: CanvasRow[]) {
@@ -274,13 +363,45 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       }));
     }
 
-    // Try canvas spillover if available
+    // Try canvas spillover if available.
+    // The source is a lazy paginating generator — it fetches the full matching result set
+    // from the API, paging via $skip, and yields rows one page at a time. spillover() drains
+    // it, registers rows as they arrive, and applies caps.maxRows as the ceiling. This ensures
+    // the canvas holds the full matching set (bounded only by MAX_CANVAS_ROWS), not just
+    // input.limit rows. input.limit controls only the inline preview row count.
     const canvas = getCanvas();
     if (canvas) {
+      const PAGE_SIZE = 1000;
+
+      /** Async generator that pages the full NFIP result set from the API. */
+      async function* nfipPageGenerator(): AsyncGenerator<CanvasRow> {
+        let skip = 0;
+        let totalFetched = 0;
+        while (true) {
+          // No orderby for canvas pagination: sorted pagination on a 49k+ dataset causes FEMA's
+          // backend to time out at deeper pages (e.g., $skip=7000+). Order doesn't matter for
+          // analytics — the full set is registered and SQL ORDER BY runs at query time.
+          const { rows: rawRows, count } = await svc.fetchNfipClaims(
+            { filter, top: PAGE_SIZE, skip },
+            ctx,
+          );
+          for (const r of rawRows) {
+            yield toCanvasRow(r);
+            totalFetched++;
+          }
+          // Stop when we've consumed all rows or the page came back short
+          if (rawRows.length < PAGE_SIZE || totalFetched >= count) break;
+          skip += PAGE_SIZE;
+          // Pause between pages to stay within the FEMA API's Akamai rate limit.
+          // Without this, rapid sequential requests receive 503 HTML responses from Drupal.
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+
       const instance = await canvas.acquire(input.canvas_id, ctx);
       const result = await spillover({
         canvas: instance,
-        source: rows,
+        source: nfipPageGenerator(),
         schema: NFIP_CANVAS_SCHEMA,
         previewChars: PREVIEW_CHARS,
         caps: { maxRows: MAX_CANVAS_ROWS },
@@ -288,18 +409,22 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       });
 
       if (result.spilled) {
+        // Slice previewRows to input.limit so the inline result honours the caller's limit.
+        const previewRows = (result.previewRows as CanvasRow[]).slice(0, input.limit);
         ctx.enrich.notice(
-          `Results staged on canvas table "${result.handle.tableName}". Use fema_dataframe_query with canvas_id "${instance.canvasId}" to run SQL aggregations.`,
+          `Results staged on canvas table "${result.handle.tableName}" (${result.handle.rowCount} rows). ` +
+            `Use fema_dataframe_query with canvas_id "${instance.canvasId}" to run SQL aggregations.`,
         );
         ctx.log.info('NFIP claims spilled to canvas', {
           canvasId: instance.canvasId,
           tableName: result.handle.tableName,
-          rowCount: result.handle.rowCount,
+          stagedCount: result.handle.rowCount,
+          truncated: result.truncated ?? false,
         });
         return {
-          claims: toOutputRows(result.previewRows as CanvasRow[]),
-          total_count: count,
-          returned_count: result.previewRows.length,
+          claims: toOutputRows(previewRows),
+          total_count: result.handle.rowCount,
+          returned_count: previewRows.length,
           canvas_id: instance.canvasId,
           canvas_table: result.handle.tableName,
           spilled: true,
@@ -307,23 +432,32 @@ export const femaSearchNfip = tool('fema_search_nfip', {
         };
       }
 
-      // Fits in preview — still surface canvas_id for potential follow-up queries
-      ctx.log.info('NFIP claims fit inline', { rowCount: result.previewRows.length, count });
+      // Fits in preview — do NOT acquire a canvas or return canvas_id; nothing was staged.
+      ctx.log.info('NFIP claims fit inline', { rowCount: result.previewRows.length });
+      const inlineRows = (result.previewRows as CanvasRow[]).slice(0, input.limit);
+      // Fetch the actual total count for this case (previewRows exhausted, count from first page)
+      // The generator already fetched the first page to check whether it overflows — but since
+      // result.spilled is false the entire source fit in the preview buffer, so result.previewRows
+      // IS the full matching set. Use its length as total_count.
       return {
-        claims: toOutputRows(result.previewRows as CanvasRow[]),
-        total_count: count,
-        returned_count: result.previewRows.length,
-        canvas_id: instance.canvasId,
-        canvas_table: '',
+        claims: toOutputRows(inlineRows),
+        total_count: result.previewRows.length,
+        returned_count: inlineRows.length,
         spilled: false,
       };
     }
 
-    // Canvas disabled — inline only
+    // Canvas disabled — fetch inline only, bounded by input.limit.
+    const { rows: rawRows, count } = await svc.fetchNfipClaims(
+      { filter, orderby: 'dateOfLoss desc', top: input.limit },
+      ctx,
+    );
+    const rows: CanvasRow[] = rawRows.map(toCanvasRow);
+
     ctx.log.info('NFIP claims inline (canvas disabled)', { returned: rows.length, count });
     if (count > rows.length) {
       ctx.enrich.notice(
-        `Showing ${rows.length} of ${count} matching claims. Enable CANVAS_PROVIDER_TYPE=duckdb for full analytical access, or increase limit and use offset for pagination.`,
+        `Showing ${rows.length} of ${count} matching claims. Enable CANVAS_PROVIDER_TYPE=duckdb for full analytical access, or apply tighter filters.`,
       );
     }
 

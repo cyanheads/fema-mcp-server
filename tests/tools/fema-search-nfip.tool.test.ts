@@ -149,19 +149,28 @@ describe('femaSearchNfip — canvas spillover path', () => {
     expect(result.returned_count).toBe(1);
   });
 
-  it('returns canvas_id and spilled=false when result fits inline', async () => {
+  it('does NOT return canvas_id when result fits inline (secondary bug fix)', async () => {
     const { spillover } = await import('@cyanheads/mcp-ts-core/canvas');
     const previewRows = Array.from({ length: 10 }, (_, i) =>
       makeClaimRow({ yearOfLoss: 2020 + i }),
-    );
+    ).map((r) => ({
+      state: r.state,
+      county_code: r.countyCode ?? null,
+      zip_code: null,
+      date_of_loss: null,
+      year_of_loss: r.yearOfLoss,
+      amount_paid_building: r.amountPaidOnBuildingClaim ?? null,
+      amount_paid_contents: null,
+      building_damage_amount: null,
+      contents_damage_amount: null,
+      rated_flood_zone: null,
+      cause_of_damage: null,
+      occupancy_type: null,
+    }));
     vi.mocked(spillover).mockResolvedValueOnce({
       spilled: false,
-      previewRows: previewRows.map((r) => ({
-        state: r.state,
-        year_of_loss: r.yearOfLoss,
-      })),
-      handle: { tableName: '', rowCount: 10 },
-      truncated: false,
+      previewRows,
+      // handle is undefined when spilled:false — match the actual spillover shape
     } as Awaited<ReturnType<typeof spillover>>);
 
     const mockInstance = {
@@ -175,8 +184,123 @@ describe('femaSearchNfip — canvas spillover path', () => {
     const ctx = createMockContext({ errors: femaSearchNfip.errors });
     const input = femaSearchNfip.input.parse({ state: 'TX' });
     const result = await femaSearchNfip.handler(input, ctx);
+    // Secondary bug (#5): non-spilled path must NOT return a canvas_id (nothing was staged)
     expect(result.spilled).toBe(false);
-    expect(result.canvas_id).toBe('canvas_xyz');
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.canvas_table).toBeUndefined();
+  });
+});
+
+describe('femaSearchNfip — canvas staged set vs limit (regression #5 primary)', () => {
+  it('stages MAX_CANVAS_ROWS rows independent of limit; truncated=true when cap hit', async () => {
+    const { spillover } = await import('@cyanheads/mcp-ts-core/canvas');
+    // Simulate a full canvas: 50k rows staged, preview has input.limit rows, cap was hit
+    const previewRow = {
+      state: 'TX',
+      county_code: '48201',
+      zip_code: null,
+      date_of_loss: null,
+      year_of_loss: 2017,
+      amount_paid_building: null,
+      amount_paid_contents: null,
+      building_damage_amount: null,
+      contents_damage_amount: null,
+      rated_flood_zone: null,
+      cause_of_damage: null,
+      occupancy_type: null,
+    };
+    vi.mocked(spillover).mockResolvedValueOnce({
+      spilled: true,
+      previewRows: [previewRow],
+      handle: { tableName: 'spilled_harvey', rowCount: 50000 },
+      truncated: true,
+    } as Awaited<ReturnType<typeof spillover>>);
+
+    // fetchNfipClaims mock — called by the paginating generator
+    const mockFetch = vi.fn().mockResolvedValue({
+      rows: Array.from({ length: 1000 }, () => makeClaimRow({ countyCode: '48201' })),
+      count: 49785,
+    });
+    await setSvcMock({ fetchNfipClaims: mockFetch });
+
+    const mockInstance = { canvasId: 'canvas_harvey', query: vi.fn(), describe: vi.fn() };
+    const mockCanvas = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+    await setCanvasMock(mockCanvas);
+
+    const ctx = createMockContext({ errors: femaSearchNfip.errors });
+    // limit=8 should NOT constrain the staged row count (that's what bug #5 was)
+    const input = femaSearchNfip.input.parse({
+      state: 'TX',
+      county_code: '48201',
+      year_from: 2017,
+      year_to: 2017,
+      limit: 8,
+    });
+    const result = await femaSearchNfip.handler(input, ctx);
+
+    expect(result.spilled).toBe(true);
+    expect(result.canvas_id).toBe('canvas_harvey');
+    // total_count reflects staged count (50000), not limit (8)
+    expect(result.total_count).toBe(50000);
+    // truncated=true because cap was hit
+    expect(result.truncated).toBe(true);
+    // inline preview capped to input.limit
+    expect(result.returned_count).toBeLessThanOrEqual(8);
+
+    // Verify spillover was called with the async generator (not a pre-materialized array)
+    const spilloverArgs = vi.mocked(spillover).mock.calls[0]?.[0];
+    expect(spilloverArgs?.source).toBeDefined();
+    // An async generator has a Symbol.asyncIterator
+    const source = spilloverArgs?.source as AsyncGenerator;
+    expect(typeof source[Symbol.asyncIterator]).toBe('function');
+  });
+});
+
+describe('femaSearchNfip — county_code normalization (regression #6)', () => {
+  beforeEach(async () => {
+    await setCanvasMock(undefined); // canvas disabled — test normalization via filter
+  });
+
+  it('prepends state FIPS when county_code is 3 digits', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      rows: [makeClaimRow({ countyCode: '48201' })],
+      count: 49785,
+    });
+    await setSvcMock({ fetchNfipClaims: mockFetch });
+
+    const ctx = createMockContext({ errors: femaSearchNfip.errors });
+    const input = femaSearchNfip.input.parse({ state: 'TX', county_code: '201' });
+    const result = await femaSearchNfip.handler(input, ctx);
+
+    // Verify the filter sent to the service uses 5-digit FIPS
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filter: expect.stringContaining("countyCode eq '48201'"),
+      }),
+      ctx,
+    );
+    // Output county_code reflects what the API returned (48201)
+    expect(result.claims[0]?.county_code).toBe('48201');
+  });
+
+  it('passes 5-digit county_code through unchanged', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      rows: [makeClaimRow({ countyCode: '48201' })],
+      count: 49785,
+    });
+    await setSvcMock({ fetchNfipClaims: mockFetch });
+
+    const ctx = createMockContext({ errors: femaSearchNfip.errors });
+    const input = femaSearchNfip.input.parse({ state: 'TX', county_code: '48201' });
+    const result = await femaSearchNfip.handler(input, ctx);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filter: expect.stringContaining("countyCode eq '48201'"),
+      }),
+      ctx,
+    );
+    expect(result.claims[0]?.county_code).toBe('48201');
   });
 });
 

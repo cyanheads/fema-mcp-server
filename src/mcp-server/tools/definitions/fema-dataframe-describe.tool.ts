@@ -12,7 +12,7 @@ export const femaDataframeDescribe = tool('fema_dataframe_describe', {
   description:
     'List tables and column schemas on a DataCanvas staged by fema_search_nfip. ' +
     'Call this before fema_dataframe_query to discover the exact table name, column names, and DuckDB data types needed to write valid SQL. ' +
-    'The canvas holds the full NFIP claims result set — row count here is the total available for queries.',
+    'Row count reflects what was actually staged — check truncated in the fema_search_nfip response to know whether the canvas holds the full matching set.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: z.string().describe('Canvas ID from the fema_search_nfip response.'),

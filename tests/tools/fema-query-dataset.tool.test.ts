@@ -79,6 +79,36 @@ describe('femaQueryDataset', () => {
     });
   });
 
+  it('unknown_dataset error message does not leak transport detail (regression #10)', async () => {
+    // The error message must not contain internal transport wording ("HTML instead of JSON")
+    // but must preserve data.reason:'unknown_dataset' for structured consumers.
+    const unknownDatasetError = new McpError(
+      JsonRpcErrorCode.NotFound,
+      'Dataset "NotARealDataset123" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).',
+      { reason: 'unknown_dataset', dataset: 'NotARealDataset123' },
+    );
+    await setMock({
+      fetchDataset: vi.fn().mockRejectedValue(unknownDatasetError),
+    });
+    const ctx = createMockContext({ errors: femaQueryDataset.errors });
+    const input = femaQueryDataset.input.parse({ dataset: 'NotARealDataset123' });
+    let caught: unknown;
+    try {
+      await femaQueryDataset.handler(input, ctx);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    const err = caught as McpError;
+    // data.reason preserved
+    expect(err.data).toMatchObject({ reason: 'unknown_dataset', dataset: 'NotARealDataset123' });
+    // message must not expose transport internals
+    expect(err.message).not.toContain('HTML');
+    expect(err.message).not.toContain('instead of JSON');
+    // message must be actionable
+    expect(err.message).toContain('NotARealDataset123');
+  });
+
   it('propagates invalid_filter error from service', async () => {
     const invalidFilterError = new McpError(JsonRpcErrorCode.InvalidParams, 'OData parse error', {
       reason: 'invalid_filter',
