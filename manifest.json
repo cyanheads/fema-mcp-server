@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "fema-mcp-server",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP claims.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/fema-mcp-server#readme",

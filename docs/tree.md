@@ -1,9 +1,10 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-06-08 15:47:42
+Generated on: 2026-06-12 03:35:51
 
 ```text
 fema-mcp-server/
+├── .agents/
 ├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
@@ -31,6 +32,7 @@ fema-mcp-server/
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts

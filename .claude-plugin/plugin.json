@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/fema-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.8",
   "description": "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"
