@@ -68,6 +68,12 @@ export const femaQueryDataset = tool('fema_query_dataset', {
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when no results were found.'),
+    totalCount: z
+      .number()
+      .optional()
+      .describe(
+        'Total matching records before pagination — exceeds returned_count when results were capped at the limit.',
+      ),
   },
   errors: [
     {
@@ -109,6 +115,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       );
     }
 
+    ctx.enrich.total(count);
     ctx.log.info('Generic dataset query complete', {
       dataset: input.dataset,
       count,

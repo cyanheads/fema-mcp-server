@@ -122,6 +122,12 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when no results were found.'),
+    totalCount: z
+      .number()
+      .optional()
+      .describe(
+        'Total matching projects before pagination — exceeds returned_count when results were capped at the limit.',
+      ),
   },
   errors: [
     {
@@ -197,6 +203,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       ...(r.firstObligationDate ? { first_obligation_date: r.firstObligationDate } : {}),
     }));
 
+    ctx.enrich.total(count);
     ctx.log.info('PA projects fetch complete', { count, returned: projects.length });
     return { projects, total_count: count, returned_count: projects.length };
   },

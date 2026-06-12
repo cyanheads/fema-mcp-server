@@ -196,6 +196,12 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when no results were found.'),
+    totalCount: z
+      .number()
+      .optional()
+      .describe(
+        'Total matching designated-area rows from the API — exceeds the returned declaration count when results were capped at the overfetch limit.',
+      ),
   },
   errors: [
     {
@@ -321,6 +327,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       });
     }
 
+    ctx.enrich.total(count);
     ctx.log.info('Disaster search complete', { count, returned: declarations.length });
     return {
       declarations,

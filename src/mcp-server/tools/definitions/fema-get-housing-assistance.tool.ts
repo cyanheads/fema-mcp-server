@@ -147,6 +147,12 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when no results were found.'),
+    totalCount: z
+      .number()
+      .optional()
+      .describe(
+        'Total owner + renter records available before the per-dataset limit — exceeds the returned count when either dataset was capped.',
+      ),
   },
   errors: [
     {
@@ -215,6 +221,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       ...(r.otherNeedsAmount != null ? { other_needs_amount: r.otherNeedsAmount } : {}),
     });
 
+    ctx.enrich.total(ownersCount + rentersCount);
     ctx.log.info('Housing assistance fetch complete', {
       disasterNumber: input.disaster_number,
       owners: ownersData.length,

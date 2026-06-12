@@ -18,6 +18,8 @@ import { setCanvas } from './services/canvas/canvas-accessor.js';
 import { initOpenFemaService } from './services/openfema/openfema-service.js';
 
 await createApp({
+  name: 'fema-mcp-server',
+  title: 'fema-mcp-server',
   tools: [
     femaSearchDisasters,
     femaGetDisaster,
