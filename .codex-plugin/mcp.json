@@ -1,5 +1,5 @@
 {
-  "@cyanheads/fema-mcp-server": {
+  "fema-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/fema-mcp-server"],
     "env": {
