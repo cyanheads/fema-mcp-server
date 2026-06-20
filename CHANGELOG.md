@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-06-20
+
+Adopt mcp-ts-core ^0.10.9 — Canvas describe() filter-qualification fix, invalid_sql gate classification, two new devcheck guards (dependency specifiers, plugin manifests), @duckdb/node-api + dev-dep refresh
+
 ## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-06-11
 
 Adopt mcp-ts-core ^0.10.6 — server identity name/title pair, totalCount enrichment on the four capped-list tools, post-pack bundle cleaner
