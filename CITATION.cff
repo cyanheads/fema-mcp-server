@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: fema-mcp-server
+abstract: "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims via MCP. STDIO or Streamable HTTP."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/fema-mcp-server"
+license: Apache-2.0
+keywords:
+  - mcp
+  - model-context-protocol
+  - fema
+  - disaster
+  - emergency-management
+  - flood-insurance
