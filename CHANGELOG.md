@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-07-04 · 🛡️ Security
+
+Declaration-type render prefixes (FM/EM/DR), consistent invalid_state validation across all state-scoped tools, fema_search_nfip no_results contract; mcp-ts-core ^0.10.10 clears 7 bun audit advisories
+
 ## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-06-20
 
 Adopt mcp-ts-core ^0.10.9 — Canvas describe() filter-qualification fix, invalid_sql gate classification, two new devcheck guards (dependency specifiers, plugin manifests), @duckdb/node-api + dev-dep refresh
