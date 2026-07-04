@@ -154,7 +154,10 @@ export const femaGetDisaster = tool('fema_get_disaster', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# DR-${result.disaster_number} — ${result.title}`);
+    const label = result.declaration_type
+      ? `${result.declaration_type}-${result.disaster_number}`
+      : `Disaster #${result.disaster_number}`;
+    lines.push(`# ${label} — ${result.title}`);
     lines.push(
       `**State:** ${result.state} | **Type:** ${result.declaration_type} | **Incident:** ${result.incident_type}`,
     );

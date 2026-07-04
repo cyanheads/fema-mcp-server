@@ -3,6 +3,7 @@
  * @module tests/tools/fema-search-nfip.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaSearchNfip } from '@/mcp-server/tools/definitions/fema-search-nfip.tool.js';
@@ -346,5 +347,55 @@ describe('femaSearchNfip — format', () => {
     expect(text).toContain('canvas_abc123');
     expect(text).toContain('spilled_abc123');
     expect(text).toContain('fema_dataframe_query');
+  });
+});
+
+describe('femaSearchNfip — state validation & empty results', () => {
+  it('throws invalid_state for unknown state codes', async () => {
+    await setCanvasMock(undefined);
+    const ctx = createMockContext({ errors: femaSearchNfip.errors });
+    const input = femaSearchNfip.input.parse({ state: 'ZZ' });
+    await expect(femaSearchNfip.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_state' },
+    });
+  });
+
+  it('throws no_results when canvas is disabled and no claims match', async () => {
+    await setSvcMock({
+      fetchNfipClaims: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+    });
+    await setCanvasMock(undefined);
+    const ctx = createMockContext({ errors: femaSearchNfip.errors });
+    const input = femaSearchNfip.input.parse({ state: 'TX', zip_code: '00000' });
+    await expect(femaSearchNfip.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_results' },
+    });
+  });
+
+  it('throws no_results when canvas is enabled but the set is empty (fits inline)', async () => {
+    const { spillover } = await import('@cyanheads/mcp-ts-core/canvas');
+    vi.mocked(spillover).mockResolvedValueOnce({
+      spilled: false,
+      previewRows: [],
+    } as Awaited<ReturnType<typeof spillover>>);
+    await setSvcMock({
+      fetchNfipClaims: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+    });
+    const mockInstance = { canvasId: 'canvas_empty', query: vi.fn(), describe: vi.fn() };
+    const mockCanvas = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+    await setCanvasMock(mockCanvas);
+
+    const ctx = createMockContext({ errors: femaSearchNfip.errors });
+    const input = femaSearchNfip.input.parse({ state: 'TX', zip_code: '00000' });
+    await expect(femaSearchNfip.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_results' },
+    });
+  });
+
+  it('rejects a malformed zip_code at the Zod validation layer', () => {
+    expect(() => femaSearchNfip.input.parse({ state: 'TX', zip_code: '1234' })).toThrow();
+    expect(() => femaSearchNfip.input.parse({ state: 'TX', zip_code: 'abcde' })).toThrow();
+    expect(() => femaSearchNfip.input.parse({ state: 'TX', zip_code: '77002' })).not.toThrow();
   });
 });

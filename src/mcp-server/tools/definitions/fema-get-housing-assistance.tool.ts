@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { US_STATES } from '@/services/openfema/us-states.js';
 
 export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
   title: 'Get FEMA Housing Assistance Data',
@@ -156,6 +157,13 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
   },
   errors: [
     {
+      reason: 'invalid_state',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The state parameter is not a valid 2-letter US state/territory code.',
+      recovery:
+        'Provide a valid 2-letter US state code such as TX, CA, FL, or PR. Check the full list at FEMA.gov.',
+    },
+    {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
       when: 'No IA housing records found for this disaster.',
@@ -165,6 +173,12 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
   ],
 
   async handler(input, ctx) {
+    if (input.state && !US_STATES.has(input.state)) {
+      throw ctx.fail('invalid_state', `"${input.state}" is not a valid US state/territory code.`, {
+        ...ctx.recoveryFor('invalid_state'),
+      });
+    }
+
     const svc = getOpenFemaService();
 
     const baseFilter = [`disasterNumber eq ${input.disaster_number}`];
@@ -198,7 +212,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
         disasterNumber: input.disaster_number,
         ...ctx.recoveryFor('no_results'),
         recovery: {
-          hint: `No housing assistance records found for DR-${input.disaster_number}. IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.`,
+          hint: `No housing assistance records found for disaster ${input.disaster_number}. IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.`,
         },
       });
     }
@@ -243,9 +257,9 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       lines.push(`## Owner Assistance (${result.owners.length} of ${result.owners_count} records)`);
       for (const o of result.owners) {
         const loc = [o.county, o.city, o.zip_code].filter(Boolean).join(', ');
-        const locLabel = loc || `DR-${o.disaster_number}`;
+        const locLabel = loc || `Disaster #${o.disaster_number}`;
         lines.push(`### ${locLabel}`);
-        if (o.state) lines.push(`**State:** ${o.state} | **Disaster:** DR-${o.disaster_number}`);
+        if (o.state) lines.push(`**State:** ${o.state} | **Disaster:** #${o.disaster_number}`);
         if (o.valid_registrations != null)
           lines.push(`**Registrations:** ${o.valid_registrations}`);
         if (o.approved_for_fema_assistance != null)
@@ -268,9 +282,9 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       );
       for (const r of result.renters) {
         const loc = [r.county, r.city, r.zip_code].filter(Boolean).join(', ');
-        const locLabel = loc || `DR-${r.disaster_number}`;
+        const locLabel = loc || `Disaster #${r.disaster_number}`;
         lines.push(`### ${locLabel}`);
-        if (r.state) lines.push(`**State:** ${r.state} | **Disaster:** DR-${r.disaster_number}`);
+        if (r.state) lines.push(`**State:** ${r.state} | **Disaster:** #${r.disaster_number}`);
         if (r.valid_registrations != null)
           lines.push(`**Registrations:** ${r.valid_registrations}`);
         if (r.approved_for_fema_assistance != null)

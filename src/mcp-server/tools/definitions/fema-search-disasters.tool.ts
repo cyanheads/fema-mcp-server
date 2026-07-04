@@ -6,69 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
-
-/** Valid US state/territory abbreviations accepted by OpenFEMA. */
-const US_STATES = new Set([
-  'AL',
-  'AK',
-  'AZ',
-  'AR',
-  'CA',
-  'CO',
-  'CT',
-  'DE',
-  'FL',
-  'GA',
-  'HI',
-  'ID',
-  'IL',
-  'IN',
-  'IA',
-  'KS',
-  'KY',
-  'LA',
-  'ME',
-  'MD',
-  'MA',
-  'MI',
-  'MN',
-  'MS',
-  'MO',
-  'MT',
-  'NE',
-  'NV',
-  'NH',
-  'NJ',
-  'NM',
-  'NY',
-  'NC',
-  'ND',
-  'OH',
-  'OK',
-  'OR',
-  'PA',
-  'RI',
-  'SC',
-  'SD',
-  'TN',
-  'TX',
-  'UT',
-  'VT',
-  'VA',
-  'WA',
-  'WV',
-  'WI',
-  'WY',
-  'DC',
-  'PR',
-  'VI',
-  'GU',
-  'AS',
-  'MP',
-  'FM',
-  'MH',
-  'PW',
-]);
+import { US_STATES } from '@/services/openfema/us-states.js';
 
 export const femaSearchDisasters = tool('fema_search_disasters', {
   title: 'Search FEMA Disaster Declarations',
@@ -342,7 +280,10 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       `**${result.returned_count} unique declaration(s)** (from ${result.total_area_rows} designated-area rows)\n`,
     );
     for (const d of result.declarations) {
-      lines.push(`## DR-${d.disaster_number} — ${d.title}`);
+      const label = d.declaration_type
+        ? `${d.declaration_type}-${d.disaster_number}`
+        : `Disaster #${d.disaster_number}`;
+      lines.push(`## ${label} — ${d.title}`);
       lines.push(
         `**State:** ${d.state} | **Type:** ${d.declaration_type} | **Incident:** ${d.incident_type}`,
       );

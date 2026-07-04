@@ -270,4 +270,58 @@ describe('femaSearchDisasters', () => {
     expect(text).toContain('PA');
     expect(text).toContain('5');
   });
+
+  it('format prefix follows the real declaration type (FM, EM) and never fabricates one', () => {
+    const output = {
+      declarations: [
+        {
+          disaster_number: 5634,
+          title: 'STINKY FIRE',
+          state: 'TX',
+          incident_type: 'Fire',
+          declaration_type: 'FM',
+          declaration_date: '2024-01-01T00:00:00.000Z',
+          ia_declared: false,
+          pa_declared: false,
+          hm_declared: false,
+          designated_area_count: 1,
+        },
+        {
+          disaster_number: 3600,
+          title: 'SEVERE STORM EMERGENCY',
+          state: 'FL',
+          incident_type: 'Severe Storm',
+          declaration_type: 'EM',
+          declaration_date: '2024-02-01T00:00:00.000Z',
+          ia_declared: false,
+          pa_declared: true,
+          hm_declared: false,
+          designated_area_count: 2,
+        },
+        {
+          // No declaration_type on the record — must fall back, never fabricate DR-.
+          disaster_number: 9999,
+          title: 'UNTYPED EVENT',
+          state: 'CA',
+          incident_type: 'Flood',
+          declaration_type: '',
+          declaration_date: '2024-03-01T00:00:00.000Z',
+          ia_declared: false,
+          pa_declared: false,
+          hm_declared: false,
+          designated_area_count: 1,
+        },
+      ],
+      total_area_rows: 4,
+      returned_count: 3,
+    };
+    const text = (femaSearchDisasters.format!(output)[0] as { text: string }).text;
+    expect(text).toContain('FM-5634');
+    expect(text).toContain('EM-3600');
+    expect(text).toContain('Disaster #9999');
+    expect(text).not.toContain('DR-5634');
+    expect(text).not.toContain('DR-3600');
+    expect(text).not.toContain('DR-9999');
+    expect(text).not.toContain('-9999');
+  });
 });

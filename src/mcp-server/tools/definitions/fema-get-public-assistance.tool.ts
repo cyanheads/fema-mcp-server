@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { US_STATES } from '@/services/openfema/us-states.js';
 
 export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   title: 'Get FEMA Public Assistance Projects',
@@ -131,6 +132,13 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   },
   errors: [
     {
+      reason: 'invalid_state',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The state parameter is not a valid 2-letter US state/territory code.',
+      recovery:
+        'Provide a valid 2-letter US state code such as TX, CA, FL, or PR. Check the full list at FEMA.gov.',
+    },
+    {
       reason: 'missing_filter',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Neither disaster_number nor state was provided.',
@@ -147,6 +155,12 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   ],
 
   async handler(input, ctx) {
+    if (input.state && !US_STATES.has(input.state)) {
+      throw ctx.fail('invalid_state', `"${input.state}" is not a valid US state/territory code.`, {
+        ...ctx.recoveryFor('invalid_state'),
+      });
+    }
+
     if (!input.disaster_number && !input.state?.trim()) {
       throw ctx.fail('missing_filter', 'Either disaster_number or state must be provided.', {
         ...ctx.recoveryFor('missing_filter'),
@@ -214,7 +228,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     for (const p of result.projects) {
       const title = p.application_title ?? `PW-${p.pw_number ?? 'unknown'}`;
       lines.push(`## ${title}`);
-      lines.push(`**Disaster:** DR-${p.disaster_number}`);
+      lines.push(`**Disaster:** #${p.disaster_number}`);
       if (p.applicant_id) lines.push(`**Applicant ID:** ${p.applicant_id}`);
       if (p.damage_category_code) {
         lines.push(

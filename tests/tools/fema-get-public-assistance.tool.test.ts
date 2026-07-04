@@ -3,6 +3,7 @@
  * @module tests/tools/fema-get-public-assistance.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaGetPublicAssistance } from '@/mcp-server/tools/definitions/fema-get-public-assistance.tool.js';
@@ -95,6 +96,15 @@ describe('femaGetPublicAssistance', () => {
     });
   });
 
+  it('throws invalid_state for unknown state codes', async () => {
+    const ctx = createMockContext({ errors: femaGetPublicAssistance.errors });
+    const input = femaGetPublicAssistance.input.parse({ state: 'ZZ' });
+    await expect(femaGetPublicAssistance.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_state' },
+    });
+  });
+
   it('handles sparse PA rows with missing optional fields', async () => {
     await setMock({
       fetchPaProjects: vi.fn().mockResolvedValue({
@@ -134,6 +144,8 @@ describe('femaGetPublicAssistance', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Road Repair');
     expect(text).toContain('500,000');
-    expect(text).toContain('DR-4781');
+    // PA records carry no declaration type — render a type-agnostic label, never DR-.
+    expect(text).toContain('**Disaster:** #4781');
+    expect(text).not.toContain('DR-4781');
   });
 });

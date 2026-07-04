@@ -143,7 +143,7 @@ FEMA/OpenFEMA-specific:
 Agent-friendly output:
 
 - Disaster number is the explicit join key across all datasets — every tool that touches a disaster surfaces it prominently so agents can chain calls without re-searching
-- Typed error contracts on every tool — `invalid_state`, `no_results`, `missing_filter`, `state_required`, `unknown_dataset`, `invalid_filter` — with recovery hints telling agents the concrete next step
+- Typed error contracts on every tool — `invalid_state`, `no_results`, `missing_filter`, `unknown_dataset`, `invalid_filter` — with recovery hints telling agents the concrete next step
 - `designatedAreaCount` on search results so agents know whether to drill in with `fema_get_disaster` without having to fetch the full record first
 
 ## Getting started

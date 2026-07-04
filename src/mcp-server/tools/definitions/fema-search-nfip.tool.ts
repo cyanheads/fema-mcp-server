@@ -5,8 +5,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { type ColumnSchema, spillover } from '@cyanheads/mcp-ts-core/canvas';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { US_STATES } from '@/services/openfema/us-states.js';
 
 /** Inline preview budget — ~25k tokens of JSON. */
 const PREVIEW_CHARS = 100_000;
@@ -124,7 +126,11 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .describe(
         'County code to narrow results within the state. Accepts the full 5-digit state+county FIPS (e.g., 48201 for Harris County TX) or the 3-digit county portion (e.g., 201) when state is provided — the server prepends the state FIPS automatically.',
       ),
-    zip_code: z.string().optional().describe('ZIP code to narrow results to a specific area.'),
+    zip_code: z
+      .string()
+      .regex(/^\d{5}$/, 'ZIP code must be exactly 5 digits (e.g., 77002).')
+      .optional()
+      .describe('ZIP code to narrow results to a specific area (5-digit, e.g., 77002).'),
     year_from: z
       .number()
       .int()
@@ -262,8 +268,30 @@ export const femaSearchNfip = tool('fema_search_nfip', {
   enrichment: {
     notice: z.string().optional().describe('Guidance on canvas usage or result scope.'),
   },
+  errors: [
+    {
+      reason: 'invalid_state',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The state parameter is not a valid 2-letter US state/territory code.',
+      recovery:
+        'Provide a valid 2-letter US state code such as TX, CA, FL, or PR. Check the full list at FEMA.gov.',
+    },
+    {
+      reason: 'no_results',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Query returned zero matching NFIP claims.',
+      recovery:
+        'Broaden the search by removing county_code, zip_code, or year filters, or verify the state code is correct.',
+    },
+  ],
 
   async handler(input, ctx) {
+    if (input.state && !US_STATES.has(input.state)) {
+      throw ctx.fail('invalid_state', `"${input.state}" is not a valid US state/territory code.`, {
+        ...ctx.recoveryFor('invalid_state'),
+      });
+    }
+
     // Normalize a bare 3-digit county code to the full 5-digit state+county FIPS.
     // NFIP data stores countyCode as 5-digit FIPS; a 3-digit value silently returns zero rows.
     let countyCode = input.county_code?.trim() ?? '';
@@ -435,6 +463,11 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       // Fits in preview — do NOT acquire a canvas or return canvas_id; nothing was staged.
       ctx.log.info('NFIP claims fit inline', { rowCount: result.previewRows.length });
       const inlineRows = (result.previewRows as CanvasRow[]).slice(0, input.limit);
+      if (inlineRows.length === 0) {
+        throw ctx.fail('no_results', `No NFIP claims matched the filters for ${input.state}.`, {
+          ...ctx.recoveryFor('no_results'),
+        });
+      }
       // Fetch the actual total count for this case (previewRows exhausted, count from first page)
       // The generator already fetched the first page to check whether it overflows — but since
       // result.spilled is false the entire source fit in the preview buffer, so result.previewRows
@@ -453,6 +486,12 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       ctx,
     );
     const rows: CanvasRow[] = rawRows.map(toCanvasRow);
+
+    if (rows.length === 0) {
+      throw ctx.fail('no_results', `No NFIP claims matched the filters for ${input.state}.`, {
+        ...ctx.recoveryFor('no_results'),
+      });
+    }
 
     ctx.log.info('NFIP claims inline (canvas disabled)', { returned: rows.length, count });
     if (count > rows.length) {

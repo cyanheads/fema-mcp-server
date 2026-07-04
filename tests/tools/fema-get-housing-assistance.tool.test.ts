@@ -3,6 +3,7 @@
  * @module tests/tools/fema-get-housing-assistance.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaGetHousingAssistance } from '@/mcp-server/tools/definitions/fema-get-housing-assistance.tool.js';
@@ -110,6 +111,19 @@ describe('femaGetHousingAssistance', () => {
     });
   });
 
+  it('throws invalid_state for unknown state codes', async () => {
+    const ctx = createMockContext({ errors: femaGetHousingAssistance.errors });
+    const input = femaGetHousingAssistance.input.parse({
+      disaster_number: 4332,
+      state: 'ZZ',
+      type: 'owners',
+    });
+    await expect(femaGetHousingAssistance.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_state' },
+    });
+  });
+
   it('handles sparse rows with missing optional amount fields', async () => {
     await setMock({
       fetchHousingAssistance: vi.fn().mockResolvedValue({
@@ -125,11 +139,12 @@ describe('femaGetHousingAssistance', () => {
     expect(result.owners[0]?.disaster_number).toBe(4781);
   });
 
-  it('formats output with owner and renter sections', () => {
+  it('formats output with owner and renter sections and a type-agnostic disaster label', () => {
     const output = {
       owners: [
         {
           disaster_number: 4781,
+          state: 'TX',
           county: 'Harris',
           city: 'Houston',
           zip_code: '77002',
@@ -138,15 +153,22 @@ describe('femaGetHousingAssistance', () => {
           repair_replace_amount: 3000000,
           rental_amount: 1000000,
         },
+        {
+          // No location fields — exercises the type-agnostic locLabel fallback header.
+          disaster_number: 4781,
+          state: 'TX',
+          total_approved_ihp_amount: 100000,
+        },
       ],
       renters: [
         {
           disaster_number: 4781,
+          state: 'TX',
           county: 'Harris',
           rental_amount: 1000000,
         },
       ],
-      owners_count: 1,
+      owners_count: 2,
       renters_count: 1,
     };
     const blocks = femaGetHousingAssistance.format!(output);
@@ -155,5 +177,9 @@ describe('femaGetHousingAssistance', () => {
     expect(text).toContain('Renter Assistance');
     expect(text).toContain('4,500,000');
     expect(text).toContain('Harris');
+    // Type-agnostic disaster label in both sections — never a fabricated DR- prefix.
+    expect(text).toContain('**Disaster:** #4781');
+    expect(text).toContain('Disaster #4781');
+    expect(text).not.toContain('DR-');
   });
 });
