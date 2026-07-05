@@ -108,7 +108,7 @@ export class OpenFemaService {
         if (isHtmlContentType) {
           throw notFound(
             `Dataset "${dataset}" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).`,
-            { reason: 'unknown_dataset', dataset },
+            { reason: 'unknown_dataset', dataset, ...ctx.recoveryFor('unknown_dataset') },
           );
         }
 
@@ -124,7 +124,7 @@ export class OpenFemaService {
           }
           throw notFound(
             `Dataset "${dataset}" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).`,
-            { reason: 'unknown_dataset', dataset },
+            { reason: 'unknown_dataset', dataset, ...ctx.recoveryFor('unknown_dataset') },
           );
         }
 
@@ -146,7 +146,7 @@ export class OpenFemaService {
                 throw validationError(cleanMessage, {
                   reason: 'invalid_filter',
                   code: e.code,
-                  name: e.name,
+                  ...ctx.recoveryFor('invalid_filter'),
                 });
               }
               throw serviceUnavailable(`OpenFEMA API error [${e.code}]: ${e.message}`, {
