@@ -3,6 +3,7 @@
  * @module tests/tools/fema-dataframe-query.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaDataframeQuery } from '@/mcp-server/tools/definitions/fema-dataframe-query.tool.js';
@@ -57,16 +58,21 @@ describe('femaDataframeQuery', () => {
     expect(result.rows[0]).toMatchObject({ year_of_loss: 2024 });
   });
 
-  it('throws when canvas is not enabled', async () => {
+  it('throws typed canvas_unavailable with recovery when canvas is not enabled', async () => {
     await setCanvasMock(undefined);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: femaDataframeQuery.errors });
     const input = femaDataframeQuery.input.parse({
       canvas_id: 'canvas_abc123',
       query: 'SELECT * FROM t',
     });
-    await expect(femaDataframeQuery.handler(input, ctx)).rejects.toThrow(
-      'DataCanvas is not enabled',
-    );
+    await expect(femaDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'canvas_unavailable',
+        retryable: false,
+        recovery: { hint: expect.stringContaining('CANVAS_PROVIDER_TYPE') },
+      },
+    });
   });
 
   it('formats query results as markdown table', () => {

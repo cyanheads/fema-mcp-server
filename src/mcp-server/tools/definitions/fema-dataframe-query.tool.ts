@@ -50,6 +50,14 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       recovery: 'Re-run fema_search_nfip to stage a fresh canvas, then use the new canvas_id.',
     },
     {
+      reason: 'canvas_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      retryable: false,
+      when: 'DataCanvas is disabled on this deployment (CANVAS_PROVIDER_TYPE is not set to duckdb).',
+      recovery:
+        'DataCanvas is disabled on this deployment, so the fema_dataframe_* tools are unavailable. Use fema_search_nfip or fema_query_dataset — both return data without canvas staging. Self-hosted operators can enable it by setting CANVAS_PROVIDER_TYPE=duckdb.',
+    },
+    {
       reason: 'invalid_query',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL statement is not a valid SELECT, references a non-existent table or column, or uses blocked operations.',
@@ -61,8 +69,10 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
   async handler(input, ctx) {
     const canvas = getCanvas();
     if (!canvas) {
-      throw new Error(
+      throw ctx.fail(
+        'canvas_unavailable',
         'DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb to use fema_dataframe_query.',
+        { ...ctx.recoveryFor('canvas_unavailable') },
       );
     }
 

@@ -3,6 +3,7 @@
  * @module tests/tools/fema-dataframe-describe.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaDataframeDescribe } from '@/mcp-server/tools/definitions/fema-dataframe-describe.tool.js';
@@ -65,13 +66,18 @@ describe('femaDataframeDescribe', () => {
     expect(result.tables[0]?.columns[0]).toMatchObject({ name: 'state', type: 'VARCHAR' });
   });
 
-  it('throws when canvas is not enabled', async () => {
+  it('throws typed canvas_unavailable with recovery when canvas is not enabled', async () => {
     await setCanvasMock(undefined);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: femaDataframeDescribe.errors });
     const input = femaDataframeDescribe.input.parse({ canvas_id: 'canvas_abc123' });
-    await expect(femaDataframeDescribe.handler(input, ctx)).rejects.toThrow(
-      'DataCanvas is not enabled',
-    );
+    await expect(femaDataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'canvas_unavailable',
+        retryable: false,
+        recovery: { hint: expect.stringContaining('CANVAS_PROVIDER_TYPE') },
+      },
+    });
   });
 
   it('formats output as table schema listing', () => {
