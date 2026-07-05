@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-07-04
+
+fema_dataframe_describe/query throw typed canvas_unavailable instead of InternalError when DataCanvas is disabled; OpenFemaService throw sites now surface declared recovery hints and drop the raw upstream name field
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-07-04 · 🛡️ Security
 
 Declaration-type render prefixes (FM/EM/DR), consistent invalid_state validation across all state-scoped tools, fema_search_nfip no_results contract; mcp-ts-core ^0.10.10 clears 7 bun audit advisories
