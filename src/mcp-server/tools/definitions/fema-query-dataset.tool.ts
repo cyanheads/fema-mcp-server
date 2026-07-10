@@ -149,7 +149,6 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       } else {
         for (const row of result.rows) {
           const parts = Object.entries(row)
-            .slice(0, 6)
             .map(([k, v]) => `${k}: ${v}`)
             .join(' | ');
           lines.push(parts);

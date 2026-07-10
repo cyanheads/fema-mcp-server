@@ -177,6 +177,34 @@ describe('femaQueryDataset', () => {
     expect(text).toContain('TX');
   });
 
+  it('renders every selected field for large (>50-row) result sets, not just the first six (regression #18)', () => {
+    // The >50-row branch previously capped each row at Object.entries(row).slice(0, 6),
+    // dropping every field past the sixth from content[] while structuredContent kept them all.
+    const rows = Array.from({ length: 51 }, (_, i) => ({
+      disasterNumber: 4700 + i,
+      declarationTitle: 'SEVERE STORMS',
+      state: 'TX',
+      incidentType: 'Severe Storm',
+      declarationType: 'DR',
+      declarationDate: '2024-09-27T00:00:00.000Z',
+      ihProgramDeclared: false,
+      paProgramDeclared: true,
+    }));
+    const output = {
+      dataset: 'DisasterDeclarationsSummaries',
+      rows,
+      total_count: 51,
+      returned_count: 51,
+    };
+    const blocks = femaQueryDataset.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    // 7th and 8th selected fields — dropped by the old six-field slice — must reach content[].
+    expect(text).toContain('ihProgramDeclared: false');
+    expect(text).toContain('paProgramDeclared: true');
+    // Parity: every row carries all selected fields (one compact line per row, all 51 rows).
+    expect((text.match(/paProgramDeclared: true/g) ?? []).length).toBe(51);
+  });
+
   it('formats empty result', () => {
     const output = {
       dataset: 'FimaNfipPolicies',
