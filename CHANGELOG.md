@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-07-09
+
+fema_search_nfip raises canvas page size to 5000 for large queries; fema_dataframe_query discloses capped SQL results with LIMIT/OFFSET continuation guidance
+
 ## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-07-09
 
 fema_search_disasters reports total_declarations and repoints pagination to declaration-level counts; fema_query_dataset and fema_get_housing_assistance fix field/sparse-record rendering gaps; mcp-ts-core ^0.10.14 adoption with supply-chain hardening
