@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaDataframeQuery } from '@/mcp-server/tools/definitions/fema-dataframe-query.tool.js';
 
@@ -73,6 +73,52 @@ describe('femaDataframeQuery', () => {
         recovery: { hint: expect.stringContaining('CANVAS_PROVIDER_TYPE') },
       },
     });
+  });
+
+  it('discloses truncation in structuredContent and content[] when the canvas caps the result (#19)', async () => {
+    const mockInstance = {
+      canvasId: 'canvas_capped',
+      // Plain (non-registerAs) path: when the result exceeds the row limit the provider returns
+      // truncated:true and sets rowCount to the applied cap (here 2), not a true total.
+      query: vi.fn().mockResolvedValue({
+        columns: ['year_of_loss'],
+        rows: [{ year_of_loss: 2017 }, { year_of_loss: 2018 }],
+        rowCount: 2,
+        truncated: true,
+      }),
+    };
+    await setCanvasMock({ acquire: vi.fn().mockResolvedValue(mockInstance) });
+
+    const ctx = createMockContext();
+    const input = femaDataframeQuery.input.parse({
+      canvas_id: 'canvas_capped',
+      query: 'SELECT year_of_loss FROM df_nfip_abc123',
+    });
+    const result = await femaDataframeQuery.handler(input, ctx);
+
+    // structuredContent is built by the framework as output.extend(enrichment).parse({ ...domain,
+    // ...enrichment }); reproduce it with the tool's own schemas. An undeclared enrichment field
+    // would be stripped here — so this proves the disclosure truly reaches structuredContent.
+    const structuredContent = femaDataframeQuery.output
+      .extend(femaDataframeQuery.enrichment ?? {})
+      .parse({ ...result, ...getEnrichment(ctx) });
+    expect(structuredContent).toMatchObject({ truncated: true, shown: 2, cap: 2 });
+
+    // content[]: the framework appends an enrichment trailer rendering `notice` (kind: notice) as a
+    // `> ...` blockquote — its text is structuredContent.notice, a deterministic LIMIT/OFFSET
+    // continuation for the submitted SQL.
+    expect(structuredContent.notice).toContain('LIMIT 2 OFFSET 2');
+  });
+
+  it('emits no truncation disclosure when the result is not capped (#19)', async () => {
+    // The beforeEach mock returns rowCount:2 with no `truncated` key — the non-capped case.
+    const ctx = createMockContext();
+    const input = femaDataframeQuery.input.parse({
+      canvas_id: 'canvas_abc123',
+      query: 'SELECT * FROM df_nfip_abc123',
+    });
+    await femaDataframeQuery.handler(input, ctx);
+    expect(getEnrichment(ctx)).toEqual({});
   });
 
   it('formats query results as markdown table', () => {

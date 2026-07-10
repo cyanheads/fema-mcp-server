@@ -24,6 +24,7 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       .string()
       .describe(
         'SQL SELECT statement to run against the staged table. Use the table name from fema_dataframe_describe. ' +
+          'Results are capped at the canvas row limit; append LIMIT/OFFSET to page through additional rows, or aggregate (GROUP BY, COUNT, SUM) to summarize the full set in one query. ' +
           'Example: "SELECT year_of_loss, COUNT(*) AS claims, SUM(amount_paid_building) AS total_building_paid FROM df_nfip_abc123 GROUP BY year_of_loss ORDER BY year_of_loss"',
       ),
   }),
@@ -36,12 +37,32 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
             'A single result row — keys are column names from the SELECT, values are the computed data.',
           ),
       )
-      .describe('All rows returned by the query.'),
+      .describe(
+        'Result rows from the query. May be capped at the canvas row limit — when the truncated ' +
+          'enrichment field is set, page the remainder with LIMIT/OFFSET (see the notice guidance).',
+      ),
     row_count: z
       .number()
       .describe('Number of rows in this response (may be capped at the canvas row limit).'),
     canvas_id: z.string().describe('Canvas ID that was queried — reuse for follow-up queries.'),
   }),
+  enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when the result was capped at the canvas row limit — more rows match than were returned.',
+      ),
+    shown: z.number().optional().describe('Number of rows returned in this (capped) response.'),
+    cap: z
+      .number()
+      .optional()
+      .describe('The canvas row limit that was applied when the result was capped.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Continuation guidance when capped — how to page the remainder with LIMIT/OFFSET.'),
+  },
   errors: [
     {
       reason: 'canvas_not_found',
@@ -79,9 +100,26 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
     const instance = await canvas.acquire(input.canvas_id, ctx);
     const result = await instance.query(input.query, { signal: ctx.signal });
 
+    // Disclose truncation when the canvas capped the result. On this plain (non-registerAs)
+    // path there is no true total — the provider sets result.rowCount to the applied cap (an
+    // echo of the row limit) and marks result.truncated. ctx.enrich.truncated writes
+    // truncated/shown/cap into structuredContent and a matching notice blockquote into content[].
+    if (result.truncated) {
+      const cap = result.rowCount;
+      ctx.enrich.truncated({
+        shown: result.rows.length,
+        cap,
+        guidance:
+          `Showing the first ${cap} rows (canvas row limit). Append "LIMIT ${cap} OFFSET ${cap}" ` +
+          `to your SELECT and re-run to fetch the next page, advancing OFFSET by ${cap} each call; ` +
+          `or aggregate (GROUP BY / COUNT / SUM) to summarize the full set without paging.`,
+      });
+    }
+
     ctx.log.info('DataCanvas query complete', {
       canvasId: input.canvas_id,
       rowCount: result.rowCount,
+      truncated: result.truncated ?? false,
     });
 
     return {
