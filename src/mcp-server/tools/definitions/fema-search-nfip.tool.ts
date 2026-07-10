@@ -399,7 +399,11 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     // input.limit rows. input.limit controls only the inline preview row count.
     const canvas = getCanvas();
     if (canvas) {
-      const PAGE_SIZE = 1000;
+      // OpenFEMA permits $top up to 10,000 rows/page. 5,000 keeps the drain to ~10 fetches
+      // for a dense ~49,785-row county-year (vs ~50 at 1,000/page) so the call finishes well
+      // inside transport timeouts, while keeping each page near half the 10k ceiling — fewer,
+      // larger fetches are also gentler on the FEMA API than many small ones.
+      const PAGE_SIZE = 5000;
 
       /** Async generator that pages the full NFIP result set from the API. */
       async function* nfipPageGenerator(): AsyncGenerator<CanvasRow> {

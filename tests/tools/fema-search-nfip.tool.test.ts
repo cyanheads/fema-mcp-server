@@ -257,6 +257,41 @@ describe('femaSearchNfip — canvas staged set vs limit (regression #5 primary)'
   });
 });
 
+describe('femaSearchNfip — NFIP canvas page size (regression #16)', () => {
+  it('pages the canvas NFIP fetch at $top=5000', async () => {
+    const { spillover } = await import('@cyanheads/mcp-ts-core/canvas');
+    // Mock spillover so the handler reaches the canvas path but does not itself drain the
+    // generator — we drive it manually below to observe the page size the generator requests.
+    vi.mocked(spillover).mockResolvedValueOnce({
+      spilled: true,
+      previewRows: [],
+      handle: { tableName: 'spilled_page', rowCount: 5000 },
+      truncated: false,
+    } as Awaited<ReturnType<typeof spillover>>);
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      rows: Array.from({ length: 5000 }, () => makeClaimRow({ countyCode: '48201' })),
+      count: 49785,
+    });
+    await setSvcMock({ fetchNfipClaims: mockFetch });
+
+    const mockInstance = { canvasId: 'canvas_page', query: vi.fn(), describe: vi.fn() };
+    const mockCanvas = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+    await setCanvasMock(mockCanvas);
+
+    const ctx = createMockContext({ errors: femaSearchNfip.errors });
+    const input = femaSearchNfip.input.parse({ state: 'TX', county_code: '48201' });
+    await femaSearchNfip.handler(input, ctx);
+
+    // Drive the async generator handed to spillover to trigger the first page fetch, then assert
+    // the page size it requests. $top=5000 is the #16 fix (was 1000).
+    const source = vi.mocked(spillover).mock.lastCall?.[0]?.source as AsyncGenerator;
+    await source.next();
+
+    expect(mockFetch).toHaveBeenCalledWith(expect.objectContaining({ top: 5000, skip: 0 }), ctx);
+  });
+});
+
 describe('femaSearchNfip — county_code normalization (regression #6)', () => {
   beforeEach(async () => {
     await setCanvasMock(undefined); // canvas disabled — test normalization via filter
