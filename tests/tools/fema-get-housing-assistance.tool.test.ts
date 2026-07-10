@@ -182,4 +182,38 @@ describe('femaGetHousingAssistance', () => {
     expect(text).toContain('Disaster #4781');
     expect(text).not.toContain('DR-');
   });
+
+  it('renders the disaster number for sparse records missing state, in both owner and renter sections (regression #20)', () => {
+    // A sparse row with county/city/ZIP but no state: the heading uses the location, so the
+    // disaster number only reaches content[] via the **Disaster:** line — previously gated on
+    // `if (state)`, which dropped the join key in both the owner and renter loops.
+    const output = {
+      owners: [
+        {
+          disaster_number: 4798,
+          county: 'Harris (County)',
+          city: 'HOUSTON',
+          zip_code: '77090',
+          total_approved_ihp_amount: 250000,
+        },
+      ],
+      renters: [
+        {
+          disaster_number: 4798,
+          county: 'Harris (County)',
+          city: 'HOUSTON',
+          zip_code: '77090',
+          rental_amount: 90000,
+        },
+      ],
+      owners_count: 1,
+      renters_count: 1,
+    };
+    const blocks = femaGetHousingAssistance.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    // The join key must reach content[] in BOTH sections even though state is absent.
+    expect((text.match(/\*\*Disaster:\*\* #4798/g) ?? []).length).toBe(2);
+    expect(text).toContain('Owner Assistance');
+    expect(text).toContain('Renter Assistance');
+  });
 });

@@ -259,7 +259,11 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
         const loc = [o.county, o.city, o.zip_code].filter(Boolean).join(', ');
         const locLabel = loc || `Disaster #${o.disaster_number}`;
         lines.push(`### ${locLabel}`);
-        if (o.state) lines.push(`**State:** ${o.state} | **Disaster:** #${o.disaster_number}`);
+        lines.push(
+          o.state
+            ? `**State:** ${o.state} | **Disaster:** #${o.disaster_number}`
+            : `**Disaster:** #${o.disaster_number}`,
+        );
         if (o.valid_registrations != null)
           lines.push(`**Registrations:** ${o.valid_registrations}`);
         if (o.approved_for_fema_assistance != null)
@@ -284,7 +288,11 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
         const loc = [r.county, r.city, r.zip_code].filter(Boolean).join(', ');
         const locLabel = loc || `Disaster #${r.disaster_number}`;
         lines.push(`### ${locLabel}`);
-        if (r.state) lines.push(`**State:** ${r.state} | **Disaster:** #${r.disaster_number}`);
+        lines.push(
+          r.state
+            ? `**State:** ${r.state} | **Disaster:** #${r.disaster_number}`
+            : `**Disaster:** #${r.disaster_number}`,
+        );
         if (r.valid_registrations != null)
           lines.push(`**Registrations:** ${r.valid_registrations}`);
         if (r.approved_for_fema_assistance != null)
