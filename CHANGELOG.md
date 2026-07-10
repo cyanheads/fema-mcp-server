@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-07-09
+
+fema_search_disasters reports total_declarations and repoints pagination to declaration-level counts; fema_query_dataset and fema_get_housing_assistance fix field/sparse-record rendering gaps; mcp-ts-core ^0.10.14 adoption with supply-chain hardening
+
 ## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-07-04
 
 fema_dataframe_describe/query throw typed canvas_unavailable instead of InternalError when DataCanvas is disabled; OpenFemaService throw sites now surface declared recovery hints and drop the raw upstream name field
