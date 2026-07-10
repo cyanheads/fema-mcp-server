@@ -3,7 +3,7 @@
  * @module tests/tools/fema-search-disasters.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaSearchDisasters } from '@/mcp-server/tools/definitions/fema-search-disasters.tool.js';
 
@@ -182,6 +182,32 @@ describe('femaSearchDisasters', () => {
     expect(result.declarations[0]?.disaster_number).toBe(4782);
   });
 
+  it('reports total_declarations as the distinct-declaration count and points the enrichment total at declarations, not area-rows (regression #17)', async () => {
+    // 5 area-rows spanning 3 distinct disasters: 4780 (3 areas), 4781 (1), 4782 (1).
+    // The raw area-row count (5) diverges from the 3 unique declarations.
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeDisasterRow({ disasterNumber: 4780 }),
+          makeDisasterRow({ disasterNumber: 4780 }),
+          makeDisasterRow({ disasterNumber: 4780 }),
+          makeDisasterRow({ disasterNumber: 4781 }),
+          makeDisasterRow({ disasterNumber: 4782 }),
+        ],
+        count: 5,
+      }),
+    });
+    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
+    const input = femaSearchDisasters.input.parse({});
+    const result = await femaSearchDisasters.handler(input, ctx);
+    // New field reports the DISTINCT declaration count, diverging from raw area-rows.
+    expect(result.total_declarations).toBe(3);
+    expect(result.total_area_rows).toBe(5);
+    expect(result.total_declarations).toBeLessThan(result.total_area_rows);
+    // The framework pagination total (ctx.enrich.total) now carries declarations, not area-rows.
+    expect(getEnrichment(ctx)).toMatchObject({ totalCount: 3 });
+  });
+
   it('throws invalid_state for unknown state codes', async () => {
     const ctx = createMockContext({ errors: femaSearchDisasters.errors });
     const input = femaSearchDisasters.input.parse({ state: 'ZZ' });
@@ -259,7 +285,8 @@ describe('femaSearchDisasters', () => {
           designated_area_count: 5,
         },
       ],
-      total_count: 10,
+      total_declarations: 1,
+      total_area_rows: 10,
       returned_count: 1,
     };
     const blocks = femaSearchDisasters.format!(output);
@@ -312,10 +339,12 @@ describe('femaSearchDisasters', () => {
           designated_area_count: 1,
         },
       ],
+      total_declarations: 3,
       total_area_rows: 4,
       returned_count: 3,
     };
     const text = (femaSearchDisasters.format!(output)[0] as { text: string }).text;
+    expect(text).toContain('3 of 3 unique declaration(s)');
     expect(text).toContain('FM-5634');
     expect(text).toContain('EM-3600');
     expect(text).toContain('Disaster #9999');

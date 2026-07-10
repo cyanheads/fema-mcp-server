@@ -120,6 +120,13 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
           .describe('Deduplicated summary for one disaster declaration.'),
       )
       .describe('Disaster declarations matching the search, one entry per unique disaster number.'),
+    total_declarations: z
+      .number()
+      .describe(
+        'Total unique disaster declarations matching the query, before offset/limit paging — the ' +
+          'bound for declaration-level pagination (limit/offset apply to declarations, not area rows). ' +
+          'A floor rather than the exact total when total_area_rows hits the 10,000-row overfetch cap.',
+      ),
     total_area_rows: z
       .number()
       .describe(
@@ -138,7 +145,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       .number()
       .optional()
       .describe(
-        'Total matching designated-area rows from the API — exceeds the returned declaration count when results were capped at the overfetch limit.',
+        'Total unique disaster declarations matching the query — the unit declaration-level pagination pages over. Exceeds returned_count when the matches span more than one page.',
       ),
   },
   errors: [
@@ -265,10 +272,11 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       });
     }
 
-    ctx.enrich.total(count);
+    ctx.enrich.total(disasterMap.size);
     ctx.log.info('Disaster search complete', { count, returned: declarations.length });
     return {
       declarations,
+      total_declarations: disasterMap.size,
       total_area_rows: count,
       returned_count: declarations.length,
     };
@@ -277,7 +285,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `**${result.returned_count} unique declaration(s)** (from ${result.total_area_rows} designated-area rows)\n`,
+      `**${result.returned_count} of ${result.total_declarations} unique declaration(s)** (from ${result.total_area_rows} designated-area rows)\n`,
     );
     for (const d of result.declarations) {
       const label = d.declaration_type
