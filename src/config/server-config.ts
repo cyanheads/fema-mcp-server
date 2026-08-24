@@ -12,6 +12,10 @@ const ServerConfigSchema = z.object({
     .number()
     .default(30000)
     .describe('HTTP request timeout in milliseconds'),
+  enableCanvasDrop: z
+    .stringbool()
+    .default(false)
+    .describe('Enable destructive removal of tables and views from a DataCanvas'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -20,6 +24,7 @@ export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     baseUrl: 'FEMA_BASE_URL',
     requestTimeoutMs: 'FEMA_REQUEST_TIMEOUT_MS',
+    enableCanvasDrop: 'FEMA_ENABLE_CANVAS_DROP',
   });
   return _config;
 }
