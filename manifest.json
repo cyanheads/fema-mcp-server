@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "fema-mcp-server",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP claims.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/fema-mcp-server#readme",
@@ -19,6 +19,7 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
+        "FEMA_ENABLE_CANVAS_DROP": "${user_config.fema_enable_canvas_drop}",
         "NODE_ENV": "production"
       }
     }
@@ -28,5 +29,13 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "fema_enable_canvas_drop": {
+      "type": "boolean",
+      "title": "Enable DataCanvas deletion",
+      "description": "Allow fema_dataframe_drop to remove staged tables and views.",
+      "required": false,
+      "default": false
+    }
+  }
 }

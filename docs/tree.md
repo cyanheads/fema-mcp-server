@@ -1,11 +1,9 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-07-10 02:07:54
+Generated on: 2026-08-23 21:30:16
 
 ```text
 fema-mcp-server/
-├── .agents/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -16,6 +14,9 @@ fema-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
+│   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
@@ -139,6 +140,7 @@ fema-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── fema-dataframe-describe.tool.ts
+│   │           ├── fema-dataframe-drop.tool.ts
 │   │           ├── fema-dataframe-query.tool.ts
 │   │           ├── fema-get-disaster.tool.ts
 │   │           ├── fema-get-housing-assistance.tool.ts
@@ -162,6 +164,7 @@ fema-mcp-server/
 │   │   └── openfema-service.test.ts
 │   └── tools/
 │       ├── fema-dataframe-describe.tool.test.ts
+│       ├── fema-dataframe-drop.tool.test.ts
 │       ├── fema-dataframe-query.tool.test.ts
 │       ├── fema-get-disaster.tool.test.ts
 │       ├── fema-get-housing-assistance.tool.test.ts
@@ -171,6 +174,7 @@ fema-mcp-server/
 │       └── fema-search-nfip.tool.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md

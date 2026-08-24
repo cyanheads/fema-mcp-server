@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-08-23
+
+Adopt mcp-ts-core ^0.12.3 with SDK v2 protocol support, strict tool inputs, explicit stateless hosting, and an opt-in fema_dataframe_drop tool
+
 ## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-07-09
 
 fema_search_nfip raises canvas page size to 5000 for large queries; fema_dataframe_query discloses capped SQL results with LIMIT/OFFSET continuation guidance

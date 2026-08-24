@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/fema-mcp-server</h1>
   <p><b>Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims via MCP. STDIO or Streamable HTTP.</b>
-  <div>8 Tools • 1 Resource</div>
+  <div>8 Tools • 1 Opt-in Tool • 1 Resource</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fema-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fema-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fema-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.14-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fema-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fema-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fema-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Eight tools covering the OpenFEMA data surface — convenience tools for the headline datasets, SQL analytics over large NFIP result sets via DuckDB canvas, and a generic escape hatch for datasets the convenience tools don't cover:
+Eight tools are advertised by default. Setting `FEMA_ENABLE_CANVAS_DROP=true` adds a ninth, destructive DataCanvas cleanup tool. Together they cover the OpenFEMA data surface — convenience tools for the headline datasets, SQL analytics over large NFIP result sets via DuckDB canvas, and a generic escape hatch for datasets the convenience tools don't cover:
 
 | Tool | Description |
 |:---|:---|
@@ -40,6 +40,7 @@ Eight tools covering the OpenFEMA data surface — convenience tools for the hea
 | `fema_search_nfip` | NFIP flood insurance claims for a state, county, or ZIP, with optional DataCanvas spillover for SQL analytics |
 | `fema_dataframe_describe` | List columns and row counts for DataCanvas tables staged by `fema_search_nfip` |
 | `fema_dataframe_query` | Run a SELECT query against a DataCanvas table staged by `fema_search_nfip` |
+| `fema_dataframe_drop` | Remove a staged DataCanvas table or view (disabled unless explicitly enabled) |
 | `fema_query_dataset` | Generic OData query against any OpenFEMA v2 dataset — escape hatch for datasets the convenience tools don't cover |
 
 ### `fema_search_disasters`
@@ -94,14 +95,15 @@ NFIP flood insurance claims with optional DuckDB-backed SQL analytics for large 
 
 ---
 
-### `fema_dataframe_describe` / `fema_dataframe_query`
+### `fema_dataframe_describe` / `fema_dataframe_query` / `fema_dataframe_drop`
 
 In-conversation SQL analytics over NFIP Claims data staged by `fema_search_nfip` on a DuckDB-backed DataCanvas.
 
 - `fema_dataframe_describe`: lists columns, types, and row count for a canvas table — use before writing a query
 - `fema_dataframe_query`: runs a single SELECT statement against the staged table; standard DuckDB SQL (GROUP BY, SUM, window functions, time-series)
+- `fema_dataframe_drop`: removes one staged table or view; disabled by default and enabled with `FEMA_ENABLE_CANVAS_DROP=true`
 - Workflow: `fema_search_nfip` (with canvas enabled) → `fema_dataframe_describe` → `fema_dataframe_query`
-- Read-only — writes, DDL, and DROP are rejected by the framework SQL gate
+- SQL queries are read-only — writes, DDL, and DROP statements are rejected by the framework SQL gate. The gated drop tool only removes staged canvas data and never changes FEMA source data.
 
 ---
 
@@ -286,7 +288,9 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `FEMA_BASE_URL` | Override the OpenFEMA API base URL. | `https://www.fema.gov/api/open/v2` |
 | `FEMA_REQUEST_TIMEOUT_MS` | Per-request HTTP timeout in milliseconds. NFIP county queries can be slow. | `30000` |
 | `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas for NFIP Claims analytics. Without it, `fema_search_nfip` inlines results up to the cap. | — |
+| `FEMA_ENABLE_CANVAS_DROP` | Enable the destructive `fema_dataframe_drop` tool for removing staged tables and views. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
+| `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. This server explicitly uses stateless; schema default `auto` resolves to stateful when no value is provided. | `stateless` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
@@ -326,7 +330,7 @@ docker build -t fema-mcp-server .
 docker run --rm -e MCP_TRANSPORT_TYPE=stdio fema-mcp-server
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/fema-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. The `@duckdb/node-api` native binary is copied from the build stage, so the production image doesn't need build tools.
+The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/fema-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. Production dependencies, including the DuckDB native binding, are installed directly in the runtime stage without lifecycle scripts.
 
 ## Project structure
 
@@ -346,7 +350,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 - Handlers throw, framework catches — no `try/catch` in tool logic
 - Use `ctx.log` for request-scoped logging, `ctx.state` for tenant-scoped storage
-- Register new tools and resources via the barrels in `src/mcp-server/*/definitions/index.ts`
+- Register new tools and resources in `src/index.ts`
 - Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
 
 ## Contributing
