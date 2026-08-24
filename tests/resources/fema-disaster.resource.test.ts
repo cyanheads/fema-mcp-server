@@ -7,6 +7,16 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaDisasterResource } from '@/mcp-server/resources/definitions/fema-disaster.resource.js';
 
+interface DisasterSummary {
+  designated_area_count: number;
+  disaster_number: number;
+  incident_begin_date?: string;
+  incident_type: string;
+  programs_declared: string[];
+  state: string;
+  title: string;
+}
+
 vi.mock('@/services/openfema/openfema-service.js', () => {
   let _mockSvc: Record<string, unknown>;
   return {
@@ -53,8 +63,8 @@ describe('femaDisasterResource', () => {
 
   it('returns disaster summary as JSON content', async () => {
     const ctx = createMockContext();
-    const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
-    const result = await femaDisasterResource.handler(params, ctx);
+    const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
+    const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result).toMatchObject({
       disaster_number: 4781,
       title: 'HURRICANE HELENE',
@@ -82,8 +92,8 @@ describe('femaDisasterResource', () => {
       }),
     });
     const ctx = createMockContext();
-    const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
-    const result = await femaDisasterResource.handler(params, ctx);
+    const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
+    const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result.programs_declared).toContain('IA');
   });
 
@@ -101,15 +111,15 @@ describe('femaDisasterResource', () => {
       }),
     });
     const ctx = createMockContext();
-    const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
-    const result = await femaDisasterResource.handler(params, ctx);
+    const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
+    const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result.programs_declared).toContain('IA');
     expect(result.designated_area_count).toBe(3);
   });
 
   it('throws NotFound for an invalid (non-numeric) disaster number', async () => {
     const ctx = createMockContext();
-    const params = femaDisasterResource.params.parse({ disasterNumber: 'abc' });
+    const params = femaDisasterResource.params!.parse({ disasterNumber: 'abc' });
     await expect(femaDisasterResource.handler(params, ctx)).rejects.toThrow();
   });
 
@@ -118,7 +128,7 @@ describe('femaDisasterResource', () => {
       fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
     });
     const ctx = createMockContext();
-    const params = femaDisasterResource.params.parse({ disasterNumber: '9999' });
+    const params = femaDisasterResource.params!.parse({ disasterNumber: '9999' });
     await expect(femaDisasterResource.handler(params, ctx)).rejects.toThrow();
   });
 
@@ -137,10 +147,10 @@ describe('femaDisasterResource', () => {
       }),
     });
     const ctx = createMockContext();
-    const params = femaDisasterResource.params.parse({ disasterNumber: '4781' });
-    const result = await femaDisasterResource.handler(params, ctx);
+    const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
+    const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result.title).toBe('SPARSE EVENT');
-    expect((result as Record<string, unknown>).state_name).toBeUndefined();
+    expect(Object.hasOwn(result, 'state_name')).toBe(false);
     expect(result.incident_begin_date).toBeUndefined();
     // programs_declared should be an empty array
     expect(result.programs_declared).toEqual([]);

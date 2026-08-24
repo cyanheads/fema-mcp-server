@@ -26,6 +26,12 @@ async function setCanvasMock(impl: unknown) {
   (mod as unknown as { __setMock: (c: unknown) => void }).__setMock(impl);
 }
 
+function createQueryContext() {
+  return createMockContext({ errors: femaDataframeQuery.errors }) as Parameters<
+    typeof femaDataframeQuery.handler
+  >[1];
+}
+
 describe('femaDataframeQuery', () => {
   beforeEach(async () => {
     const mockInstance = {
@@ -45,7 +51,7 @@ describe('femaDataframeQuery', () => {
   });
 
   it('returns SQL query results from a canvas table', async () => {
-    const ctx = createMockContext();
+    const ctx = createQueryContext();
     const input = femaDataframeQuery.input.parse({
       canvas_id: 'canvas_abc123',
       query:
@@ -89,7 +95,7 @@ describe('femaDataframeQuery', () => {
     };
     await setCanvasMock({ acquire: vi.fn().mockResolvedValue(mockInstance) });
 
-    const ctx = createMockContext();
+    const ctx = createQueryContext();
     const input = femaDataframeQuery.input.parse({
       canvas_id: 'canvas_capped',
       query: 'SELECT year_of_loss FROM df_nfip_abc123',
@@ -100,7 +106,7 @@ describe('femaDataframeQuery', () => {
     // ...enrichment }); reproduce it with the tool's own schemas. An undeclared enrichment field
     // would be stripped here — so this proves the disclosure truly reaches structuredContent.
     const structuredContent = femaDataframeQuery.output
-      .extend(femaDataframeQuery.enrichment ?? {})
+      .extend(femaDataframeQuery.enrichment!)
       .parse({ ...result, ...getEnrichment(ctx) });
     expect(structuredContent).toMatchObject({ truncated: true, shown: 2, cap: 2 });
 
@@ -112,7 +118,7 @@ describe('femaDataframeQuery', () => {
 
   it('emits no truncation disclosure when the result is not capped (#19)', async () => {
     // The beforeEach mock returns rowCount:2 with no `truncated` key — the non-capped case.
-    const ctx = createMockContext();
+    const ctx = createQueryContext();
     const input = femaDataframeQuery.input.parse({
       canvas_id: 'canvas_abc123',
       query: 'SELECT * FROM df_nfip_abc123',

@@ -28,7 +28,7 @@ async function setMock(impl: Record<string, unknown>) {
 function makePaRow(overrides: Record<string, unknown> = {}) {
   return {
     disasterNumber: 4781,
-    pwNumber: 'PW-001',
+    pwNumber: 1,
     applicantId: 'TXHC',
     applicationTitle: 'Harris County Road Repair',
     damageCategoryCode: 'C',
@@ -62,7 +62,7 @@ describe('femaGetPublicAssistance', () => {
     expect(result.projects).toHaveLength(1);
     expect(result.projects[0]).toMatchObject({
       disaster_number: 4781,
-      pw_number: 'PW-001',
+      pw_number: 1,
       damage_category_code: 'C',
       total_obligated: 500000,
     });
@@ -125,7 +125,7 @@ describe('femaGetPublicAssistance', () => {
       projects: [
         {
           disaster_number: 4781,
-          pw_number: 'PW-001',
+          pw_number: 1,
           application_title: 'Road Repair',
           damage_category_code: 'C',
           damage_category_description: 'Roads and Bridges',

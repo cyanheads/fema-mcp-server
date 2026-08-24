@@ -52,7 +52,7 @@ describe('femaDataframeDescribe', () => {
   });
 
   it('returns table metadata for a canvas', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: femaDataframeDescribe.errors });
     const input = femaDataframeDescribe.input.parse({ canvas_id: 'canvas_abc123' });
     const result = await femaDataframeDescribe.handler(input, ctx);
     expect(result.canvas_id).toBe('canvas_abc123');

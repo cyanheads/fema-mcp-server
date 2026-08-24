@@ -129,7 +129,7 @@ describe('femaSearchNfip — canvas spillover path', () => {
     vi.mocked(spillover).mockResolvedValueOnce({
       spilled: true,
       previewRows: [makeClaimRow()],
-      handle: { tableName: 'spilled_abc123', rowCount: 5000 },
+      handle: { tableName: 'spilled_abc123', rowCount: 5000, columns: [] },
       truncated: false,
     } as Awaited<ReturnType<typeof spillover>>);
 
@@ -213,7 +213,7 @@ describe('femaSearchNfip — canvas staged set vs limit (regression #5 primary)'
     vi.mocked(spillover).mockResolvedValueOnce({
       spilled: true,
       previewRows: [previewRow],
-      handle: { tableName: 'spilled_harvey', rowCount: 50000 },
+      handle: { tableName: 'spilled_harvey', rowCount: 50000, columns: [] },
       truncated: true,
     } as Awaited<ReturnType<typeof spillover>>);
 
@@ -265,7 +265,7 @@ describe('femaSearchNfip — NFIP canvas page size (regression #16)', () => {
     vi.mocked(spillover).mockResolvedValueOnce({
       spilled: true,
       previewRows: [],
-      handle: { tableName: 'spilled_page', rowCount: 5000 },
+      handle: { tableName: 'spilled_page', rowCount: 5000, columns: [] },
       truncated: false,
     } as Awaited<ReturnType<typeof spillover>>);
 

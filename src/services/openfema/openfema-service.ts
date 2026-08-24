@@ -8,7 +8,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { notFound, serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   OpenFemaEnvelope,
@@ -184,8 +184,7 @@ export class OpenFemaService {
       },
       {
         operation: `OpenFemaService.fetchDataset(${dataset})`,
-        // Context is safe to pass — the retry helper strips non-serializable fields before logging.
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         signal: ctx.signal,
       },

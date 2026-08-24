@@ -161,7 +161,6 @@ describe('femaGetDisaster', () => {
     const result = await femaGetDisaster.handler(input, ctx);
     expect(result.incident_begin_date).toBeUndefined();
     expect(result.incident_end_date).toBeUndefined();
-    expect(result.state_name).toBeUndefined();
     expect(result.ia_declared).toBe(false);
   });
 
@@ -192,24 +191,27 @@ describe('femaGetDisaster', () => {
   it.each([
     ['FM', 5634],
     ['EM', 3600],
-  ] as const)('format prefixes the disaster number with the real %s declaration type', (type, num) => {
-    const output = {
-      disaster_number: num,
-      title: 'TEST EVENT',
-      state: 'TX',
-      incident_type: 'Fire',
-      declaration_type: type,
-      declaration_date: '2024-01-01T00:00:00.000Z',
-      ia_declared: false,
-      pa_declared: false,
-      hm_declared: false,
-      designated_areas: [{ area: 'Harris County' }],
-      designated_area_count: 1,
-    };
-    const text = (femaGetDisaster.format!(output)[0] as { text: string }).text;
-    expect(text).toContain(`${type}-${num}`);
-    expect(text).not.toContain(`DR-${num}`);
-  });
+  ] as const)(
+    'format prefixes the disaster number with the real %s declaration type',
+    (type, num) => {
+      const output = {
+        disaster_number: num,
+        title: 'TEST EVENT',
+        state: 'TX',
+        incident_type: 'Fire',
+        declaration_type: type,
+        declaration_date: '2024-01-01T00:00:00.000Z',
+        ia_declared: false,
+        pa_declared: false,
+        hm_declared: false,
+        designated_areas: [{ area: 'Harris County' }],
+        designated_area_count: 1,
+      };
+      const text = (femaGetDisaster.format!(output)[0] as { text: string }).text;
+      expect(text).toContain(`${type}-${num}`);
+      expect(text).not.toContain(`DR-${num}`);
+    },
+  );
 
   it('format falls back to a type-agnostic label when declaration_type is absent', () => {
     const output = {
