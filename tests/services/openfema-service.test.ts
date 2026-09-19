@@ -6,7 +6,7 @@
  */
 
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -15,14 +15,10 @@ import { OpenFemaService } from '@/services/openfema/openfema-service.js';
 
 /** Minimal Response stub — only the members fetchDataset reads. */
 function mockResponse(opts: { status: number; contentType: string; body?: string }): Response {
-  return {
+  return new Response(opts.body ?? '', {
     status: opts.status,
-    ok: opts.status >= 200 && opts.status < 300,
-    headers: {
-      get: (name: string) => (name.toLowerCase() === 'content-type' ? opts.contentType : null),
-    },
-    text: async () => opts.body ?? '',
-  } as unknown as Response;
+    headers: { 'content-type': opts.contentType },
+  });
 }
 
 /** The recovery hint declared for a reason on the fema_query_dataset contract. */
@@ -36,7 +32,75 @@ describe('OpenFemaService.fetchDataset error contracts', () => {
   const svc = new OpenFemaService({} as unknown as AppConfig, {} as unknown as StorageService);
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it('preserves successful rows and upstream counts', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockResponse({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ Records: [{ id: 1 }], metadata: { count: 7 } }),
+        }),
+      ),
+    );
+    await expect(svc.fetchDataset('Records', {}, createMockContext())).resolves.toEqual({
+      rows: [{ id: 1 }],
+      count: 7,
+    });
+  });
+
+  it('fails non-retryable HTTP responses once without exposing the query URL', async () => {
+    vi.useFakeTimers();
+    const fetch = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(new Response('not implemented', { status: 501 })));
+    vi.stubGlobal('fetch', fetch);
+    const result = svc
+      .fetchDataset('Records', { filter: "secret eq 'private'" }, createMockContext())
+      .catch((error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ retryable: false });
+    expect(error.data).not.toHaveProperty('url');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds a stalled response body with the total request deadline', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url, options: RequestInit) =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{'));
+                options.signal?.addEventListener(
+                  'abort',
+                  () => controller.error(options.signal?.reason),
+                  { once: true },
+                );
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+    let settled = false;
+    const result = svc.fetchDataset('Records', {}, createMockContext()).catch((error) => {
+      settled = true;
+      return error;
+    });
+    await vi.advanceTimersByTimeAsync(30001);
+    expect(settled).toBe(true);
+    const error = await result;
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data.reason).toBe('retry_deadline_exceeded');
   });
 
   it('surfaces the declared unknown_dataset recovery hint from the service throw', async () => {

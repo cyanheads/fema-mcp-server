@@ -6,9 +6,14 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { notFound, serviceUnavailable, validationError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  McpError,
+  notFound,
+  serviceUnavailable,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   OpenFemaEnvelope,
@@ -71,95 +76,58 @@ export class OpenFemaService {
     const url = `${this.baseUrl}/${dataset}?${qs}`;
 
     return withRetry(
-      async () => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
-        // Combine the request abort signal with the timeout signal
-        const signal =
-          ctx.signal &&
-          typeof (AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }).any ===
-            'function'
-            ? (AbortSignal as { any: (signals: AbortSignal[]) => AbortSignal }).any([
-                ctx.signal,
-                controller.signal,
-              ])
-            : controller.signal;
-
+      async ({ signal, remainingMs }) => {
         let response: Response;
         try {
-          response = await fetch(url, { signal });
-        } finally {
-          clearTimeout(timeoutId);
-        }
-
-        const contentType = response.headers.get('content-type') ?? '';
-        const isHtmlContentType = contentType.includes('text/html') || contentType.includes('html');
-
-        // 5xx with HTML body = transient upstream error (Drupal 503 under rate-limiting).
-        // Throw serviceUnavailable so withRetry can back off and retry.
-        if (isHtmlContentType && response.status >= 500) {
-          throw serviceUnavailable(
-            `OpenFEMA API returned HTTP ${response.status} for dataset "${dataset}" — possible rate limit. Retry after a short delay.`,
-            { status: response.status, url },
-          );
-        }
-
-        // HTML content-type on a non-5xx (typically 404) = unknown dataset (Drupal error page).
-        if (isHtmlContentType) {
-          throw notFound(
-            `Dataset "${dataset}" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).`,
-            { reason: 'unknown_dataset', dataset, ...ctx.recoveryFor('unknown_dataset') },
-          );
+          response = await fetchWithTimeout(url, Math.min(this.timeoutMs, remainingMs), ctx, {
+            signal,
+            expectedStatuses: [400, 404],
+            errorHeaders: ['content-type'],
+          });
+        } catch (error) {
+          if (!(error instanceof McpError)) throw error;
+          const status = error.data?.status;
+          const body = typeof error.data?.body === 'string' ? error.data.body : '';
+          const headers = error.data?.headers as Record<string, string> | undefined;
+          if (
+            status === 404 ||
+            (status === 400 &&
+              (headers?.['content-type']?.includes('html') || isHtmlResponse(body)))
+          ) {
+            throw notFound(
+              `Dataset "${dataset}" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).`,
+              { reason: 'unknown_dataset', dataset, ...ctx.recoveryFor('unknown_dataset') },
+            );
+          }
+          if (status === 400) {
+            let parsed: OpenFemaErrorResponse | undefined;
+            try {
+              parsed = JSON.parse(body) as OpenFemaErrorResponse;
+            } catch {
+              /* Non-JSON errors retain the framework classification. */
+            }
+            const detail = parsed?.error?.[0];
+            if (detail) {
+              const cleanMessage = /expected to be one of.*(?:Byte|Int16|SByte)/i.test(
+                detail.message ?? '',
+              )
+                ? 'Disaster number is outside the valid FEMA range (1–32767).'
+                : "Invalid OData $filter expression. String values must use single quotes; field names are case-sensitive. Example: state eq 'TX' and declarationDate ge '2024-01-01T00:00:00.000Z'";
+              throw validationError(cleanMessage, {
+                reason: 'invalid_filter',
+                code: detail.code,
+                ...ctx.recoveryFor('invalid_filter'),
+              });
+            }
+          }
+          throw error;
         }
 
         const text = await response.text();
-
-        // Body HTML check as fallback (some error pages send application/json content-type)
-        if (isHtmlResponse(text)) {
-          if (response.status >= 500) {
-            throw serviceUnavailable(
-              `OpenFEMA API returned HTTP ${response.status} for dataset "${dataset}" — possible rate limit. Retry after a short delay.`,
-              { status: response.status, url },
-            );
-          }
+        if (response.headers.get('content-type')?.includes('html') || isHtmlResponse(text)) {
           throw notFound(
             `Dataset "${dataset}" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).`,
             { reason: 'unknown_dataset', dataset, ...ctx.recoveryFor('unknown_dataset') },
-          );
-        }
-
-        if (!response.ok) {
-          // Parse structured FEMA error response
-          try {
-            const errBody = JSON.parse(text) as OpenFemaErrorResponse;
-            if (errBody.error?.[0]) {
-              const e = errBody.error[0];
-              if (response.status === 400) {
-                // Sanitize the API error before surfacing it. The raw message may contain
-                // internal parser offsets ("at 469"), undefined error codes, and schema
-                // type details (Int16, Byte) that are not actionable for callers. Produce
-                // a clean message based on the error pattern.
-                const rawMsg = e.message ?? '';
-                const cleanMessage = /expected to be one of.*(?:Byte|Int16|SByte)/i.test(rawMsg)
-                  ? 'Disaster number is outside the valid FEMA range (1–32767).'
-                  : "Invalid OData $filter expression. String values must use single quotes; field names are case-sensitive. Example: state eq 'TX' and declarationDate ge '2024-01-01T00:00:00.000Z'";
-                throw validationError(cleanMessage, {
-                  reason: 'invalid_filter',
-                  code: e.code,
-                  ...ctx.recoveryFor('invalid_filter'),
-                });
-              }
-              throw serviceUnavailable(`OpenFEMA API error [${e.code}]: ${e.message}`, {
-                status: response.status,
-              });
-            }
-          } catch (parseErr) {
-            // Re-throw if it's already a classified McpError
-            if (parseErr instanceof Error && 'code' in parseErr) throw parseErr;
-          }
-          throw serviceUnavailable(
-            `OpenFEMA API returned HTTP ${response.status} for dataset "${dataset}".`,
-            { status: response.status, url },
           );
         }
 
@@ -169,7 +137,7 @@ export class OpenFemaService {
         } catch {
           throw serviceUnavailable(
             'OpenFEMA returned non-JSON response — possible upstream error.',
-            { url },
+            { dataset },
           );
         }
 
@@ -187,6 +155,7 @@ export class OpenFemaService {
         context: ctx,
         baseDelayMs: 1000,
         signal: ctx.signal,
+        deadlineMs: this.timeoutMs,
       },
     );
   }

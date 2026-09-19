@@ -11,7 +11,7 @@ const ServerConfigSchema = z.object({
   requestTimeoutMs: z.coerce
     .number()
     .default(30000)
-    .describe('HTTP request timeout in milliseconds'),
+    .describe('Total upstream exchange and retry budget in milliseconds'),
   enableCanvasDrop: z
     .stringbool()
     .default(false)
