@@ -35,7 +35,7 @@ function createQueryContext() {
 describe('femaDataframeQuery', () => {
   beforeEach(async () => {
     const mockInstance = {
-      canvasId: 'canvas_abc123',
+      canvasId: 'Ab_012-xy9',
       query: vi.fn().mockResolvedValue({
         rows: [
           { year_of_loss: 2024, claims: 150, total_building: 7500000 },
@@ -53,12 +53,12 @@ describe('femaDataframeQuery', () => {
   it('returns SQL query results from a canvas table', async () => {
     const ctx = createQueryContext();
     const input = femaDataframeQuery.input.parse({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       query:
         'SELECT year_of_loss, COUNT(*) as claims, SUM(amount_paid_building) as total_building FROM spilled_abc123 GROUP BY year_of_loss ORDER BY year_of_loss',
     });
     const result = await femaDataframeQuery.handler(input, ctx);
-    expect(result.canvas_id).toBe('canvas_abc123');
+    expect(result.canvas_id).toBe('Ab_012-xy9');
     expect(result.row_count).toBe(2);
     expect(result.rows).toHaveLength(2);
     expect(result.rows[0]).toMatchObject({ year_of_loss: 2024 });
@@ -68,7 +68,7 @@ describe('femaDataframeQuery', () => {
     await setCanvasMock(undefined);
     const ctx = createMockContext({ errors: femaDataframeQuery.errors });
     const input = femaDataframeQuery.input.parse({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       query: 'SELECT * FROM t',
     });
     await expect(femaDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
@@ -83,7 +83,7 @@ describe('femaDataframeQuery', () => {
 
   it('discloses truncation in structuredContent and content[] when the canvas caps the result (#19)', async () => {
     const mockInstance = {
-      canvasId: 'canvas_capped',
+      canvasId: 'Cap012-xy9',
       // Plain (non-registerAs) path: when the result exceeds the row limit the provider returns
       // truncated:true and sets rowCount to the applied cap (here 2), not a true total.
       query: vi.fn().mockResolvedValue({
@@ -97,7 +97,7 @@ describe('femaDataframeQuery', () => {
 
     const ctx = createQueryContext();
     const input = femaDataframeQuery.input.parse({
-      canvas_id: 'canvas_capped',
+      canvas_id: 'Cap012-xy9',
       query: 'SELECT year_of_loss FROM df_nfip_abc123',
     });
     const result = await femaDataframeQuery.handler(input, ctx);
@@ -120,7 +120,7 @@ describe('femaDataframeQuery', () => {
     // The beforeEach mock returns rowCount:2 with no `truncated` key — the non-capped case.
     const ctx = createQueryContext();
     const input = femaDataframeQuery.input.parse({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       query: 'SELECT * FROM df_nfip_abc123',
     });
     await femaDataframeQuery.handler(input, ctx);
@@ -134,11 +134,11 @@ describe('femaDataframeQuery', () => {
         { year_of_loss: 2023, claims: 200, total_building: 9000000 },
       ],
       row_count: 2,
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
     };
     const blocks = femaDataframeQuery.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('canvas_abc123');
+    expect(text).toContain('Ab_012-xy9');
     expect(text).toContain('year_of_loss');
     expect(text).toContain('2024');
     expect(text).toContain('7500000');
@@ -148,7 +148,7 @@ describe('femaDataframeQuery', () => {
     const output = {
       rows: [],
       row_count: 0,
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
     };
     const blocks = femaDataframeQuery.format!(output);
     const text = (blocks[0] as { text: string }).text;

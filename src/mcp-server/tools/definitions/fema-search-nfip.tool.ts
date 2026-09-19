@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { type ColumnSchema, spillover } from '@cyanheads/mcp-ts-core/canvas';
+import { CanvasIdSchema, type ColumnSchema, spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
@@ -155,12 +155,9 @@ export const femaSearchNfip = tool('fema_search_nfip', {
         'Maximum claim rows to return in the inline preview (1–10000, default 1000). ' +
           'When DataCanvas is enabled, the canvas stages the full matching result set regardless of this value.',
       ),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'Optional canvas ID from a prior call. Omit to create a fresh canvas. The response returns the canvas_id to pass to fema_dataframe_query.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Optional canvas ID from a prior call. Omit to create a fresh canvas. The response returns the canvas_id to pass to fema_dataframe_query.',
+    ),
   }),
   output: z.object({
     claims: z

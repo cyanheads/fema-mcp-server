@@ -9,7 +9,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaSearchNfip } from '@/mcp-server/tools/definitions/fema-search-nfip.tool.js';
 
 // Mock the canvas module at the top level so `spillover` can be controlled per-test
-vi.mock('@cyanheads/mcp-ts-core/canvas', () => ({
+vi.mock('@cyanheads/mcp-ts-core/canvas', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/canvas')>()),
   spillover: vi.fn(),
 }));
 
@@ -134,7 +135,7 @@ describe('femaSearchNfip — canvas spillover path', () => {
     } as Awaited<ReturnType<typeof spillover>>);
 
     const mockInstance = {
-      canvasId: 'canvas_abc123',
+      canvasId: 'Ab_012-xy9',
       query: vi.fn(),
       describe: vi.fn(),
     };
@@ -144,7 +145,7 @@ describe('femaSearchNfip — canvas spillover path', () => {
     const ctx = createMockContext({ errors: femaSearchNfip.errors });
     const input = femaSearchNfip.input.parse({ state: 'TX' });
     const result = await femaSearchNfip.handler(input, ctx);
-    expect(result.canvas_id).toBe('canvas_abc123');
+    expect(result.canvas_id).toBe('Ab_012-xy9');
     expect(result.spilled).toBe(true);
     expect(result.canvas_table).toBe('spilled_abc123');
     expect(result.returned_count).toBe(1);
@@ -373,13 +374,13 @@ describe('femaSearchNfip — format', () => {
       claims: [{ state: 'TX', year_of_loss: 2024, amount_paid_building: 50000 }],
       total_count: 5000,
       returned_count: 1,
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       canvas_table: 'spilled_abc123',
       spilled: true,
     };
     const blocks = femaSearchNfip.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('canvas_abc123');
+    expect(text).toContain('Ab_012-xy9');
     expect(text).toContain('spilled_abc123');
     expect(text).toContain('fema_dataframe_query');
   });

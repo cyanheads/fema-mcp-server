@@ -4,6 +4,7 @@
  */
 
 import { disabledTool, tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
@@ -21,7 +22,7 @@ const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
     openWorldHint: false,
   },
   input: z.object({
-    canvas_id: z.string().describe('Canvas ID from the fema_search_nfip response.'),
+    canvas_id: CanvasIdSchema.describe('Canvas ID from the fema_search_nfip response.'),
     table_name: z
       .string()
       .describe('Exact table or view name returned by fema_dataframe_describe.'),
@@ -36,6 +37,7 @@ const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
   errors: [
     {
       reason: 'canvas_not_found',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id does not correspond to an active canvas session.',
       recovery: 'Re-run fema_search_nfip to stage a fresh canvas, then use the new canvas_id.',

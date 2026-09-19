@@ -40,7 +40,7 @@ describe('femaDataframeDrop', () => {
   it('drops the requested canvas table', async () => {
     const ctx = createMockContext({ errors: femaDataframeDrop.errors });
     const input = femaDataframeDrop.input.parse({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       table_name: 'df_nfip_abc123',
     });
 
@@ -48,7 +48,7 @@ describe('femaDataframeDrop', () => {
 
     expect(drop).toHaveBeenCalledWith('df_nfip_abc123');
     expect(result).toEqual({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       table_name: 'df_nfip_abc123',
       dropped: true,
     });
@@ -58,7 +58,7 @@ describe('femaDataframeDrop', () => {
     drop.mockResolvedValue(false);
     const ctx = createMockContext({ errors: femaDataframeDrop.errors });
     const input = femaDataframeDrop.input.parse({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       table_name: 'missing_table',
     });
 
@@ -71,7 +71,7 @@ describe('femaDataframeDrop', () => {
     await setCanvasMock(undefined);
     const ctx = createMockContext({ errors: femaDataframeDrop.errors });
     const input = femaDataframeDrop.input.parse({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       table_name: 'df_nfip_abc123',
     });
 
@@ -87,12 +87,12 @@ describe('femaDataframeDrop', () => {
 
   it('formats both drop outcomes', () => {
     const removed = femaDataframeDrop.format!({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       table_name: 'df_nfip_abc123',
       dropped: true,
     });
     const absent = femaDataframeDrop.format!({
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       table_name: 'df_nfip_abc123',
       dropped: false,
     });

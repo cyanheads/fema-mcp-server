@@ -42,7 +42,7 @@ const mockTableInfo = [
 describe('femaDataframeDescribe', () => {
   beforeEach(async () => {
     const mockInstance = {
-      canvasId: 'canvas_abc123',
+      canvasId: 'Ab_012-xy9',
       describe: vi.fn().mockResolvedValue(mockTableInfo),
     };
     const mockCanvas = {
@@ -53,9 +53,9 @@ describe('femaDataframeDescribe', () => {
 
   it('returns table metadata for a canvas', async () => {
     const ctx = createMockContext({ errors: femaDataframeDescribe.errors });
-    const input = femaDataframeDescribe.input.parse({ canvas_id: 'canvas_abc123' });
+    const input = femaDataframeDescribe.input.parse({ canvas_id: 'Ab_012-xy9' });
     const result = await femaDataframeDescribe.handler(input, ctx);
-    expect(result.canvas_id).toBe('canvas_abc123');
+    expect(result.canvas_id).toBe('Ab_012-xy9');
     expect(result.tables).toHaveLength(1);
     expect(result.tables[0]).toMatchObject({
       name: 'spilled_abc123',
@@ -69,7 +69,7 @@ describe('femaDataframeDescribe', () => {
   it('throws typed canvas_unavailable with recovery when canvas is not enabled', async () => {
     await setCanvasMock(undefined);
     const ctx = createMockContext({ errors: femaDataframeDescribe.errors });
-    const input = femaDataframeDescribe.input.parse({ canvas_id: 'canvas_abc123' });
+    const input = femaDataframeDescribe.input.parse({ canvas_id: 'Ab_012-xy9' });
     await expect(femaDataframeDescribe.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: {
@@ -82,7 +82,7 @@ describe('femaDataframeDescribe', () => {
 
   it('formats output as table schema listing', () => {
     const output = {
-      canvas_id: 'canvas_abc123',
+      canvas_id: 'Ab_012-xy9',
       tables: [
         {
           name: 'spilled_abc123',
@@ -97,7 +97,7 @@ describe('femaDataframeDescribe', () => {
     };
     const blocks = femaDataframeDescribe.format!(output);
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('canvas_abc123');
+    expect(text).toContain('Ab_012-xy9');
     expect(text).toContain('spilled_abc123');
     expect(text).toContain('state');
     expect(text).toContain('VARCHAR');

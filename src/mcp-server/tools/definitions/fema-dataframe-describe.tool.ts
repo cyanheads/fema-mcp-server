@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 
@@ -15,7 +16,7 @@ export const femaDataframeDescribe = tool('fema_dataframe_describe', {
     'Row count reflects what was actually staged — check truncated in the fema_search_nfip response to know whether the canvas holds the full matching set.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
-    canvas_id: z.string().describe('Canvas ID from the fema_search_nfip response.'),
+    canvas_id: CanvasIdSchema.describe('Canvas ID from the fema_search_nfip response.'),
   }),
   output: z.object({
     tables: z
@@ -66,6 +67,7 @@ export const femaDataframeDescribe = tool('fema_dataframe_describe', {
   errors: [
     {
       reason: 'canvas_not_found',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id does not correspond to an active canvas session.',
       recovery: 'Re-run fema_search_nfip to stage a fresh canvas, then use the new canvas_id.',

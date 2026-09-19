@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema, DUCKDB_ERROR_REASONS } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 
@@ -17,9 +18,9 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
     'Only SELECT statements are allowed — DDL, DML, COPY, and file-reading functions are blocked.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
-    canvas_id: z
-      .string()
-      .describe('Canvas ID from the fema_search_nfip response (the canvas_id field).'),
+    canvas_id: CanvasIdSchema.describe(
+      'Canvas ID from the fema_search_nfip response (the canvas_id field).',
+    ),
     query: z
       .string()
       .describe(
@@ -65,7 +66,16 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
   },
   errors: [
     {
+      reason: DUCKDB_ERROR_REASONS.sqlExecutionError,
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A SELECT fails while converting or calculating values in the staged data.',
+      recovery:
+        'Use TRY_CAST or filter out incompatible values before converting or calculating them.',
+    },
+    {
       reason: 'canvas_not_found',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id does not correspond to an active canvas session.',
       recovery: 'Re-run fema_search_nfip to stage a fresh canvas, then use the new canvas_id.',
@@ -80,6 +90,7 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
     },
     {
       reason: 'invalid_query',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL statement is not a valid SELECT, references a non-existent table or column, or uses blocked operations.',
       recovery:
