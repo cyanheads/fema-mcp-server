@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-19 · ⚠️ Breaking · 🛡️ Security
+
+Canvas tools now validate server-issued IDs, OpenFEMA calls use one bounded exchange budget without exposing request URLs, and the server defaults to stateless sessions while preserving explicit overrides.
+
 ## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-08-23
 
 Adopt mcp-ts-core ^0.12.3 with SDK v2 protocol support, strict tool inputs, explicit stateless hosting, and an opt-in fema_dataframe_drop tool
