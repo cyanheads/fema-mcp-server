@@ -21,6 +21,7 @@ import { initOpenFemaService } from './services/openfema/openfema-service.js';
 await createApp({
   name: 'fema-mcp-server',
   title: 'fema-mcp-server',
+  sessionMode: 'stateless',
   tools: [
     femaSearchDisasters,
     femaGetDisaster,
@@ -39,14 +40,5 @@ await createApp({
     setCanvas(core.canvas);
   },
   instructions:
-    'FEMA disaster and flood data server. Primary entry points:\n' +
-    '- fema_search_disasters: find federal disaster declarations by state/type/date\n' +
-    '- fema_get_disaster: all designated areas for a specific disaster number\n' +
-    '- fema_get_public_assistance: PA funded projects (where recovery money went)\n' +
-    '- fema_get_housing_assistance: IA housing grants by county/ZIP\n' +
-    '- fema_search_nfip: NFIP flood insurance claims (requires state filter; stages to canvas for SQL)\n' +
-    '- fema_dataframe_describe/query/drop: inspect, query, and optionally remove staged canvas data\n' +
-    '- fema_query_dataset: generic OData access to any OpenFEMA v2 dataset\n' +
-    '- fema://disaster/{number}: read-once disaster summary resource\n' +
-    'Disaster number is the join key across all PA and IA tools.',
+    'Start with fema_search_disasters and use the disaster number to join declarations with public and housing assistance. For NFIP claims, supply a state filter; when results include a canvas_id, inspect columns with fema_dataframe_describe before querying with fema_dataframe_query. Use fema_query_dataset for other OpenFEMA v2 datasets.',
 });

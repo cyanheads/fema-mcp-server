@@ -78,6 +78,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
   errors: [
     {
       reason: 'unknown_dataset',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Dataset name not recognized by the OpenFEMA API.',
       recovery:
@@ -85,6 +86,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
     },
     {
       reason: 'invalid_filter',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'OData filter expression could not be parsed by the API.',
       recovery:
