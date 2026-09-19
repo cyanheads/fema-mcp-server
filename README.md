@@ -27,9 +27,11 @@
 
 ---
 
-## Tools
+## Overview
 
-Eight tools are advertised by default. Setting `FEMA_ENABLE_CANVAS_DROP=true` adds a ninth, destructive DataCanvas cleanup tool. Together they cover the OpenFEMA data surface — convenience tools for the headline datasets, SQL analytics over large NFIP result sets via DuckDB canvas, and a generic escape hatch for datasets the convenience tools don't cover:
+Federal disaster recovery data from FEMA's OpenFEMA API — disaster declarations, public assistance grants, individual housing assistance, and NFIP flood insurance claims. Search declarations by state or incident, drill into public assistance and housing assistance by disaster number, and run SQL analytics over large NFIP result sets via DataCanvas. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -40,104 +42,112 @@ Eight tools are advertised by default. Setting `FEMA_ENABLE_CANVAS_DROP=true` ad
 | `fema_search_nfip` | NFIP flood insurance claims for a state, county, or ZIP, with optional DataCanvas spillover for SQL analytics |
 | `fema_dataframe_describe` | List columns and row counts for DataCanvas tables staged by `fema_search_nfip` |
 | `fema_dataframe_query` | Run a SELECT query against a DataCanvas table staged by `fema_search_nfip` |
-| `fema_dataframe_drop` | Remove a staged DataCanvas table or view (disabled unless explicitly enabled) |
+| `fema_dataframe_drop` | Remove a staged DataCanvas table or view — opt-in, absent from `tools/list` by default |
 | `fema_query_dataset` | Generic OData query against any OpenFEMA v2 dataset — escape hatch for datasets the convenience tools don't cover |
 
-### `fema_search_disasters`
+`fema_dataframe_drop` is registered only when `FEMA_ENABLE_CANVAS_DROP=true`; the other eight tools are always advertised.
 
-The primary entry point — "what disasters were declared in Texas in 2025?"
+### Resources
 
-- Filter by state (2-letter code), incident type (Hurricane, Flood, Wildfire, etc.), declaration type (`DR`/`EM`/`FM`), date range, and county
-- Returns deduplicated declaration-level summaries — one row per declaration, not per designated area
-- Includes disaster number (the join key for PA and housing tools), title, state, incident type, declaration/incident dates, programs declared (IA/PA/HM), and `designatedAreaCount`
-- Paginated via `limit` / `offset`
-
----
-
-### `fema_get_disaster`
-
-Fetch all designated-area records for a specific FEMA disaster number.
-
-- Returns every county/municipality row for the declaration with programs activated, incident period, and FIPS codes
-- Use after `fema_search_disasters` to drill into a specific event; the disaster number chains to PA and housing tools
-- `DisasterDeclarationsSummaries` returns one row per designated area — a single declaration can span dozens of counties
-
----
-
-### `fema_get_public_assistance`
-
-Retrieve PA funded project details — where federal recovery money went after a disaster.
-
-- Filter by `disaster_number`, `state`, or `county`; at least one of `disaster_number` or `state` is required
-- Returns applicant, damage category, project size/status, federal share obligated, and total obligated
-- Useful for journalists, researchers, and oversight analysts tracking federal grant flows
-
----
-
-### `fema_get_housing_assistance`
-
-Individual assistance housing data for a disaster, broken down by county and ZIP.
-
-- Returns owner and renter breakdowns via `type` param (`owners`/`renters`/`both`)
-- Fields include valid registrations, total inspected, total damage, approved IHP amounts, repair/rental/other-needs amounts, and max grants
-- Covers `HousingAssistanceOwners` and `HousingAssistanceRenters` datasets in a single call
-
----
-
-### `fema_search_nfip`
-
-NFIP flood insurance claims with optional DuckDB-backed SQL analytics for large result sets.
-
-- Requires at minimum a `state` filter — unfiltered NFIP Claims is 2.7M rows
-- Additional filters: `county_code`, `zip_code`, `year_from`, `year_to`; pagination via `limit`
-- When `CANVAS_PROVIDER_TYPE=duckdb` is set and results exceed the inline cap, the full result set spills to a DataCanvas table and returns a `canvas_id` handle
-- Use `fema_dataframe_describe` to inspect the schema, then `fema_dataframe_query` for aggregation, grouping, and time-series analysis without re-fetching
-
----
-
-### `fema_dataframe_describe` / `fema_dataframe_query` / `fema_dataframe_drop`
-
-In-conversation SQL analytics over NFIP Claims data staged by `fema_search_nfip` on a DuckDB-backed DataCanvas.
-
-- `fema_dataframe_describe`: lists columns, types, and row count for a canvas table — use before writing a query
-- `fema_dataframe_query`: runs a single SELECT statement against the staged table; standard DuckDB SQL (GROUP BY, SUM, window functions, time-series)
-- `fema_dataframe_drop`: removes one staged table or view; disabled by default and enabled with `FEMA_ENABLE_CANVAS_DROP=true`
-- Workflow: `fema_search_nfip` (with canvas enabled) → `fema_dataframe_describe` → `fema_dataframe_query`
-- SQL queries are read-only — writes, DDL, and DROP statements are rejected by the framework SQL gate. The gated drop tool only removes staged canvas data and never changes FEMA source data.
-
----
-
-### `fema_query_dataset`
-
-Generic OData query against any OpenFEMA v2 dataset — the escape hatch for datasets the convenience tools don't cover.
-
-- Accepts raw `$filter`, `$select`, `$orderby`, `limit`, and `offset` params
-- Dataset name must match an actual OpenFEMA endpoint (e.g. `FimaNfipPolicies`, `IndividualAssistanceHousingRegistrantsLargeDisasters`)
-- Validates that the API returns JSON (Content-Type check) and surfaces structured error codes on 400 responses
-
-## Resources and prompts
-
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `fema://disaster/{disasterNumber}` | Summary for a specific FEMA disaster declaration — title, state, incident type, programs, incident period |
+| Resource | Description |
+|:---|:---|
+| `fema://disaster/{disasterNumber}` | Summary for a specific FEMA disaster declaration — title, state, incident type, programs, incident period |
 
 All resource data is also reachable via tools. Use `fema_get_disaster` for the same data with pagination and full designated-area detail.
 
+## Capability reference
+
+### `fema_search_disasters` <sub>tool</sub>
+
+- Filters: `state` (2-letter code), `incident_type` (substring match), `declaration_type` (`DR`/`EM`/`FM`), `date_from`/`date_to` (declaration date range), `county` (substring); paginated via `limit` (1–1000, default 50) / `offset`
+- Returns deduplicated declaration-level summaries — one row per unique disaster number, with `designated_area_count` and program flags (`ia_declared`/`pa_declared`/`hm_declared`)
+- Deduplicates the most recent 10,000 designated-area rows before paging; when `total_area_rows` exceeds 10,000, unique-declaration totals are lower bounds
+- Typed errors: `invalid_state`, `no_results`
+
+---
+
+### `fema_get_disaster` <sub>tool</sub>
+
+- Input: `disaster_number` (positive integer), obtained from `fema_search_disasters`
+- Returns every designated county/municipality row for the declaration, with FIPS codes, incident period, and program flags OR'd across all areas
+- Disaster numbers above 32767 (OpenFEMA's Int16 field limit) return `not_found` rather than a raw API type-mismatch error
+
+---
+
+### `fema_get_public_assistance` <sub>tool</sub>
+
+- Requires `disaster_number` or `state` — at least one; optional `county` substring filter; paginated via `limit` (1–1000, default 100) / `offset`
+- Returns applicant, damage category, project size/status, federal share obligated, and total obligated per project
+- Typed errors: `invalid_state`, `missing_filter` (neither `disaster_number` nor `state` given), `no_results`
+
+---
+
+### `fema_get_housing_assistance` <sub>tool</sub>
+
+- Input: `disaster_number` (required), optional `state` filter, `type` (`owners`/`renters`/`both`, default `both`); paginated via `limit` (1–1000, default 100) / `offset`
+- Returns separate `owners` and `renters` arrays — registrations, approved amounts, and repair/rental/other-needs breakdowns by county and ZIP
+- Typed errors: `invalid_state`, `no_results` (IA housing data can take weeks to appear after a declaration)
+
+---
+
+### `fema_search_nfip` <sub>tool</sub>
+
+- `state` is required — the unfiltered NFIP Claims dataset is 2.7M rows; optional `county_code` (5-digit FIPS or a bare 3-digit code, auto-prefixed with the state FIPS), `zip_code`, `year_from`/`year_to`; inline preview capped at `limit` (1–10000, default 1000)
+- When `CANVAS_PROVIDER_TYPE=duckdb` is set and results exceed the 100,000-character inline preview budget, the matching set spills to a DataCanvas table (up to 50,000 rows) and the response carries `canvas_id`/`canvas_table`; `truncated: true` marks a partial stage at that cap
+- Without canvas enabled, results return inline only, bounded by `limit`
+- Typed errors: `invalid_state`, `no_results`
+
+---
+
+### `fema_dataframe_describe` <sub>tool</sub>
+
+All four canvas inputs (`fema_search_nfip`, `fema_dataframe_describe`, `fema_dataframe_query`, and `fema_dataframe_drop`) require a server-issued 10-character URL-safe ID matching `[A-Za-z0-9_-]{10}` when supplied. Omit it on the first NFIP search.
+
+- Input: `canvas_id` from a `fema_search_nfip` response
+- Lists table/view names, DuckDB column types, and nullability; row count reflects what was actually staged, not the inline preview
+- Typed errors: `canvas_not_found`, `canvas_unavailable` (DataCanvas not enabled on this deployment)
+
+---
+
+### `fema_dataframe_query` <sub>tool</sub>
+
+- Input: `canvas_id` plus a single SQL `query`; only SELECT statements are permitted — DDL, DML, COPY, and file-reading functions are blocked
+- Results are capped at the canvas row limit; a capped response sets `truncated`/`shown`/`cap` enrichment fields with LIMIT/OFFSET paging guidance
+- Typed errors: `canvas_not_found`, `canvas_unavailable`, `invalid_query`, `sql_execution_error` (use `TRY_CAST` or filter incompatible values)
+
+---
+
+### `fema_dataframe_drop` <sub>tool</sub>
+
+- Opt-in: not registered (absent from `tools/list`) unless `FEMA_ENABLE_CANVAS_DROP=true`
+- Input: `canvas_id` and the exact `table_name` from `fema_dataframe_describe`
+- Removes one staged table or view only — never changes FEMA source data; `dropped: false` when the name doesn't exist
+- Typed errors: `canvas_not_found`, `canvas_unavailable`
+
+---
+
+### `fema_query_dataset` <sub>tool</sub>
+
+- Input: `dataset` (case-sensitive OpenFEMA v2 entity name), optional raw OData `filter`/`select`/`orderby`, `limit` (1–10000, default 100) / `offset`
+- Escape hatch for datasets the convenience tools don't cover (e.g. `FimaNfipPolicies`, `IndividualAssistanceHousingRegistrantsLargeDisasters`); for NFIP Policies use `propertyState` (not `state`) and always include a county or ZIP filter to avoid timeout
+- Typed errors: `unknown_dataset` (name not recognized), `invalid_filter` (OData syntax error)
+
+---
+
+### `fema://disaster/{disasterNumber}` <sub>resource</sub>
+
+- Params: `disasterNumber` as a string
+- Returns title, state, incident type, declaration type/date, incident period, `programs_declared` array, and `designated_area_count`
+- Disaster numbers above 32767 return not-found, same as `fema_get_disaster`
+
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool, resource, and prompt definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+OpenFEMA-specific:
 
-FEMA/OpenFEMA-specific:
-
-- Typed OpenFEMA REST client with OData parameter building (`%24`-encoded to satisfy Akamai's Drupal layer), response parsing, and structured error classification (JSON 400 vs HTML 404)
-- Automatic deduplication of `DisasterDeclarationsSummaries` — one row per designated area collapsed to declaration-level summaries with `designatedAreaCount`
+- Typed OpenFEMA REST client with `%24`-prefixed OData parameter encoding (an Akamai requirement) and structured error classification distinguishing JSON 400 responses from HTML Drupal error pages
+- Automatic deduplication of `DisasterDeclarationsSummaries` — one row per designated area collapsed to declaration-level summaries with `designated_area_count`
 - NFIP Claims guard: `state` filter is required to prevent unbounded 2.7M-row fetches
 - DataCanvas spillover for NFIP analytics — large NFIP result sets materialize as DuckDB tables queryable via SQL without re-fetching
 - No API keys required — OpenFEMA is a free, public API
@@ -146,7 +156,7 @@ Agent-friendly output:
 
 - Disaster number is the explicit join key across all datasets — every tool that touches a disaster surfaces it prominently so agents can chain calls without re-searching
 - Typed error contracts on every tool — `invalid_state`, `no_results`, `missing_filter`, `unknown_dataset`, `invalid_filter`, `canvas_unavailable` — with recovery hints telling agents the concrete next step
-- `designatedAreaCount` on search results so agents know whether to drill in with `fema_get_disaster` without having to fetch the full record first
+- `designated_area_count` on search results so agents know whether to drill in with `fema_get_disaster` without having to fetch the full record first
 
 ## Getting started
 
@@ -248,7 +258,7 @@ To enable DuckDB-backed SQL analytics for NFIP Claims:
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - No API keys required — OpenFEMA is a free, public API.
 - Optional: set `CANVAS_PROVIDER_TYPE=duckdb` to enable SQL analytics over large NFIP Claims result sets.
 
@@ -286,11 +296,11 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `FEMA_BASE_URL` | Override the OpenFEMA API base URL. | `https://www.fema.gov/api/open/v2` |
-| `FEMA_REQUEST_TIMEOUT_MS` | Per-request HTTP timeout in milliseconds. NFIP county queries can be slow. | `30000` |
+| `FEMA_REQUEST_TIMEOUT_MS` | Total budget in milliseconds for one upstream exchange, including response body, retries, and backoff. NFIP county queries can be slow. | `30000` |
 | `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas for NFIP Claims analytics. Without it, `fema_search_nfip` inlines results up to the cap. | — |
 | `FEMA_ENABLE_CANVAS_DROP` | Enable the destructive `fema_dataframe_drop` tool for removing staged tables and views. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. This server explicitly uses stateless; schema default `auto` resolves to stateful when no value is provided. | `stateless` |
+| `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. Overrides this server's explicit stateless default. The framework schema default `auto` resolves to stateful. | `stateless` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
@@ -355,7 +365,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck

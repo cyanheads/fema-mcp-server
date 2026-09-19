@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-08-23 21:30:16
+Generated on: 2026-09-19 18:42:10
 
 ```text
 fema-mcp-server/
@@ -14,6 +14,8 @@ fema-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -27,23 +29,7 @@ fema-mcp-server/
 ├── docs/
 │   ├── design.md
 │   └── idea.md
-├── scripts/
-│   ├── build-changelog.ts
-│   ├── build.ts
-│   ├── check-dependency-specifiers.ts
-│   ├── check-docs-sync.ts
-│   ├── check-framework-antipatterns.ts
-│   ├── check-skill-versions.ts
-│   ├── check-skills-sync.ts
-│   ├── clean-mcpb.ts
-│   ├── clean.ts
-│   ├── devcheck.ts
-│   ├── lint-mcp.ts
-│   ├── lint-packaging.ts
-│   ├── list-skills.ts
-│   ├── release-github.ts
-│   └── tree.ts
-├── skills/
+├── framework-skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
 │   ├── add-prompt/
@@ -114,6 +100,8 @@ fema-mcp-server/
 │   │   └── SKILL.md
 │   ├── release-and-publish/
 │   │   └── SKILL.md
+│   ├── release-pr-review/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
@@ -128,6 +116,22 @@ fema-mcp-server/
 │   │   └── SKILL.md
 │   └── tool-defs-analysis/
 │       └── SKILL.md
+├── scripts/
+│   ├── build-changelog.ts
+│   ├── build.ts
+│   ├── check-dependency-specifiers.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
+│   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   ├── release-github.ts
+│   └── tree.ts
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -163,6 +167,8 @@ fema-mcp-server/
 │   ├── services/
 │   │   └── openfema-service.test.ts
 │   └── tools/
+│       ├── canvas-engine-contract.test.ts
+│       ├── canvas-input-contract.test.ts
 │       ├── fema-dataframe-describe.tool.test.ts
 │       ├── fema-dataframe-drop.tool.test.ts
 │       ├── fema-dataframe-query.tool.test.ts
