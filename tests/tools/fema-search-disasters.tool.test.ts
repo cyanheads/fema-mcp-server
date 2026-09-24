@@ -526,18 +526,24 @@ describe('femaSearchDisasters — offset past the end (#32)', () => {
     expect(structured).not.toHaveProperty('notice');
   });
 
-  it('says the total is a floor when the 10,000-row overfetch cap was hit', async () => {
-    await setMock({
-      fetchDisasters: vi.fn().mockResolvedValue({ rows: threeDeclarationRows(), count: 25_000 }),
-    });
+  it('composes the past-the-end and lower-bound sentences into one notice when the 10,000-row cap was hit', async () => {
+    // The window's oldest row (DR-4782) is dated on the day the cap cut through, so it is dropped.
+    const rows = [
+      ...threeDeclarationRows().slice(0, 4),
+      makeDisasterRow({ disasterNumber: 4782, declarationDate: '2024-09-20T00:00:00.000Z' }),
+    ];
+    await setMock({ fetchDisasters: vi.fn().mockResolvedValue({ rows, count: 25_000 }) });
     const result = await runToolContract(femaSearchDisasters, { offset: 50 });
     expect(result.isError).not.toBe(true);
-    const notice = (result.structuredContent as { notice: string }).notice;
-    expect(notice).toContain('last valid offset is 2');
+    const structured = result.structuredContent as { notice: string; truncated: boolean };
+    expect(structured).toMatchObject({ total_declarations: 2, truncated: true });
+    const notice = structured.notice;
+    expect(notice).toContain('last valid offset is 1');
+    expect(notice).toContain('2 declarations dated after 2024-09-20');
     expect(notice).toContain('10,000');
-    expect(notice).toMatch(/narrow/i);
-    // More than 3 declarations match; only 3 are reachable inside the capped window.
-    expect(notice).not.toContain('3 matching declarations');
+    expect(notice).toContain('date_to=2024-09-20');
+    // More than 2 declarations match; only 2 are reachable inside the trimmed window.
+    expect(notice).not.toContain('2 matching declarations');
     expect(contentText(result)).toContain(notice);
   });
 });

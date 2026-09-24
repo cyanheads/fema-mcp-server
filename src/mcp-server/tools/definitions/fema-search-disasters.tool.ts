@@ -11,6 +11,13 @@ import { US_STATES } from '@/services/openfema/us-states.js';
 const CALENDAR_DATE_ERROR =
   'Expected a calendar date in YYYY-MM-DD form (e.g., 2024-01-31) — no time, partial date, or day past the end of the month.';
 
+/**
+ * Designated-area rows read per search, newest declaration date first — OpenFEMA's largest
+ * `$top`. OpenFEMA returns one row per designated area per disaster, so paging declarations
+ * means reading their rows and deduplicating before `limit`/`offset` apply.
+ */
+const OVERFETCH_CAP = 10_000;
+
 export const femaSearchDisasters = tool('fema_search_disasters', {
   title: 'Search FEMA Disaster Declarations',
   description:
@@ -19,7 +26,8 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     'designatedAreaCount showing how many counties/municipalities were designated. ' +
     'The disaster number is the chain key for fema_get_disaster, fema_get_public_assistance, and fema_get_housing_assistance. ' +
     'Use declaration_type to filter: DR (major disaster, most common), EM (emergency), FM (fire management). ' +
-    'Date filters apply to the declaration date. Use fema_get_disaster to retrieve all designated-area rows for a specific declaration.',
+    'Date filters apply to the declaration date. Use fema_get_disaster to retrieve all designated-area rows for a specific declaration. ' +
+    'A search reads the most recent 10,000 designated-area rows; when more match, it returns the declarations dated after the day that window ends, sets truncated, and its notice names the date_to that continues with older declarations.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     state: z
@@ -134,9 +142,9 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     total_declarations: z
       .number()
       .describe(
-        'Total unique disaster declarations matching the query, before offset/limit paging — the ' +
+        'Unique disaster declarations matching the query, before offset/limit paging — the ' +
           'bound for declaration-level pagination (limit/offset apply to declarations, not area rows). ' +
-          'A floor rather than the exact total when total_area_rows hits the 10,000-row overfetch cap.',
+          'A lower bound when truncated is true: it counts only the declarations dated after the day the 10,000-row window ends.',
       ),
     total_area_rows: z
       .number()
@@ -144,7 +152,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
         'Total matching designated-area rows from the API (raw row count, not declaration count). ' +
           'DisasterDeclarationsSummaries returns one row per designated area per disaster, ' +
           'so this is always ≥ the number of unique declarations. ' +
-          'When total_area_rows exceeds 10 000, results are truncated to the most recent 10 000 rows — apply tighter filters to stay within this window.',
+          'When it exceeds 10,000, the search reads the most recent 10,000 rows and drops the declarations dated on the oldest day among them, so every returned declaration is complete; the notice names the date_to that continues with older declarations.',
       ),
     returned_count: z
       .number()
@@ -155,14 +163,24 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       .string()
       .optional()
       .describe(
-        'Paging guidance when offset is at or past the end of the matching declarations — names the total and the last valid offset.',
+        'Paging guidance: when offset is at or past the end of the matching declarations, the total and the last valid offset; when truncated is true, that the totals are lower bounds and the date_to (YYYY-MM-DD) to search next for older declarations.',
       ),
     totalCount: z
       .number()
       .optional()
       .describe(
-        'Total unique disaster declarations matching the query — the unit declaration-level pagination pages over. Exceeds returned_count when the matches span more than one page.',
+        'Unique disaster declarations matching the query — the unit declaration-level pagination pages over. Exceeds returned_count when the matches span more than one page. A lower bound when truncated is true.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when more than 10,000 designated-area rows match: the search covers only the declarations dated after the day its 10,000-row window ends. Each returned declaration is complete, the totals are lower bounds, and the notice names the date_to that continues with older declarations. Absent otherwise.',
+      ),
+  },
+  enrichmentTrailer: {
+    // Read only when totalCount is written without the total kind-tag: a truncated search.
+    totalCount: { label: 'Lower bound on total declarations' },
   },
   errors: [
     {
@@ -201,13 +219,6 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     }
 
     const svc = getOpenFemaService();
-    // Overfetch all matching area-rows so we can dedup to declaration-level
-    // before applying limit/offset. OpenFEMA's DisasterDeclarationsSummaries
-    // returns one row per designated area per disaster, so passing limit/offset
-    // directly as $top/$skip skips area-rows — not declarations — producing
-    // undercounts and split declarations across pages. A cap of 10 000 rows
-    // covers hundreds of declared disasters while keeping response times reasonable.
-    const OVERFETCH_CAP = 10_000;
     const { rows, count } = await svc.fetchDisasters(
       {
         ...(filterParts.length > 0 ? { filter: filterParts.join(' and ') } : {}),
@@ -221,8 +232,24 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       ctx,
     );
 
-    // Deduplicate: group all area-rows by disasterNumber, accumulating designatedAreaCount.
-    // The full dedup gives accurate designated_area_count for every disaster in scope.
+    /**
+     * Past the cap, the window ends partway through the rows dated on its oldest day. Every row
+     * of a declaration shares one declarationDate, so dropping that whole day leaves only
+     * complete declarations — exactly the matches dated after it, which date_to=<that day>
+     * (inclusive through 23:59:59.999Z) continues with no gap and no overlap.
+     */
+    let cutDay: string | undefined;
+    if (count > OVERFETCH_CAP) {
+      cutDay = rows.at(-1)?.declarationDate?.slice(0, 10);
+      if (!cutDay) {
+        throw new Error('OpenFEMA returned a declaration row without a declarationDate.');
+      }
+    }
+    const windowRows = cutDay
+      ? rows.filter((row) => row.declarationDate?.slice(0, 10) !== cutDay)
+      : rows;
+
+    // Deduplicate: group area-rows by disasterNumber, accumulating designatedAreaCount.
     const disasterMap = new Map<
       number,
       {
@@ -241,7 +268,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       }
     >();
 
-    for (const row of rows) {
+    for (const row of windowRows) {
       const num = row.disasterNumber ?? 0;
       const existing = disasterMap.get(num);
       if (existing) {
@@ -284,19 +311,35 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       });
     }
 
-    ctx.enrich.total(disasterMap.size);
+    const total = disasterMap.size;
+    // One notice: enrich.notice is last-wins, so the past-the-end and window sentences compose.
+    const notice: string[] = [];
     if (declarations.length === 0) {
-      const last = `the last valid offset is ${disasterMap.size - 1}`;
-      ctx.enrich.notice(
-        count > rows.length
-          ? `Offset ${input.offset} is past the end of the ${disasterMap.size} declarations within the most recent 10,000 of ${count} matching designated-area rows; ${last}. Narrow the filters to reach older declarations.`
-          : `Offset ${input.offset} is past the end of the ${disasterMap.size} matching declarations; ${last}.`,
+      const scope = cutDay
+        ? `${total} declarations dated after ${cutDay}`
+        : `${total} matching declarations`;
+      notice.push(
+        `Offset ${input.offset} is past the end of the ${scope}; the last valid offset is ${total - 1}.`,
       );
     }
-    ctx.log.info('Disaster search complete', { count, returned: declarations.length });
+    if (cutDay) {
+      ctx.enrich({ truncated: true, totalCount: total });
+      notice.push(
+        `${count.toLocaleString('en-US')} designated-area rows match, more than the ${OVERFETCH_CAP.toLocaleString('en-US')} one search reads, so this search covers only the ${total} declarations dated after ${cutDay} and the declaration totals are lower bounds. ` +
+          `To continue with older declarations, repeat the search with date_to=${cutDay} and offset 0.`,
+      );
+    } else {
+      ctx.enrich.total(total);
+    }
+    if (notice.length > 0) ctx.enrich.notice(notice.join(' '));
+    ctx.log.info('Disaster search complete', {
+      count,
+      returned: declarations.length,
+      ...(cutDay ? { cutDay } : {}),
+    });
     return {
       declarations,
-      total_declarations: disasterMap.size,
+      total_declarations: total,
       total_area_rows: count,
       returned_count: declarations.length,
     };
@@ -305,7 +348,9 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `**${result.returned_count} of ${result.total_declarations} unique declaration(s)** (from ${result.total_area_rows} designated-area rows)\n`,
+      result.total_area_rows > OVERFETCH_CAP
+        ? `**${result.returned_count} of ${result.total_declarations}+ unique declaration(s)** — a lower bound: ${result.total_area_rows.toLocaleString('en-US')} designated-area rows match, more than the ${OVERFETCH_CAP.toLocaleString('en-US')} one search reads\n`
+        : `**${result.returned_count} of ${result.total_declarations} unique declaration(s)** (from ${result.total_area_rows} designated-area rows)\n`,
     );
     for (const d of result.declarations) {
       const label = d.declaration_type
