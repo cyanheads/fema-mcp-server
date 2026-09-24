@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-09-24
+
+fema_search_nfip pages claims by offset within a 100,000-character inline budget and acquires a canvas only to stage an overflowing match; fema_search_disasters returns only complete declarations past its 10,000-row window, with a date_to continuation.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-23 · ⚠️ Breaking
 
 Datasets resolve their OpenFEMA API version from the dataset catalog, OpenFEMA 400 errors name the failing clause and field, and paging past the end returns a notice instead of no_results; fema_search_disasters date_from/date_to now accept only YYYY-MM-DD dates.
