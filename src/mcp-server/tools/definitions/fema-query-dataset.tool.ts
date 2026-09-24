@@ -1,5 +1,6 @@
 /**
- * @fileoverview Tool: fema_query_dataset — generic OData query against any OpenFEMA v2 dataset.
+ * @fileoverview Tool: fema_query_dataset — generic OData query against any dataset in the
+ * OpenFEMA dataset catalog, at the API version the catalog lists for it.
  * @module mcp-server/tools/definitions/fema-query-dataset
  */
 
@@ -10,21 +11,21 @@ import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 export const femaQueryDataset = tool('fema_query_dataset', {
   title: 'Query Any OpenFEMA Dataset',
   description:
-    'Generic OData query against any OpenFEMA v2 dataset — the escape hatch for datasets the ' +
-    'convenience tools do not cover (e.g., FimaNfipPolicies, IndividualAssistanceHousingRegistrantsLargeDisasters, ' +
+    'Generic OData query against any dataset in the OpenFEMA dataset catalog — the escape hatch for datasets the ' +
+    'convenience tools do not cover (e.g., NfipPolicies, IndividualAssistanceHousingRegistrantsLargeDisasters, ' +
     'FemaWebDeclarationAreas, PublicAssistanceApplicants). ' +
     'Accepts raw OData filter, select, orderby, and pagination parameters. ' +
-    'For NFIP Policies, use propertyState (not state) as the state field — always include a county or ZIP filter ' +
-    'to avoid timeout. ' +
-    'The dataset name must match the exact OpenFEMA v2 entity name (case-sensitive, e.g., FimaNfipClaims). ' +
-    'Unknown dataset names return an unknown_dataset error.',
+    'For NfipPolicies, use propertyState (not state) for the state and reportedZipCode for the ZIP code — it has no countyCode; ' +
+    'always include a ZIP filter to avoid timeout. ' +
+    'The dataset name must match the exact OpenFEMA entity name (case-sensitive, e.g., NfipClaims). ' +
+    'Names missing from the catalog return an unknown_dataset error.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     dataset: z
       .string()
       .min(1)
       .describe(
-        'OpenFEMA v2 dataset entity name (case-sensitive, e.g., FimaNfipPolicies, FemaWebDeclarationAreas, PublicAssistanceApplicants).',
+        'OpenFEMA dataset entity name (case-sensitive, e.g., NfipPolicies, FemaWebDeclarationAreas, PublicAssistanceApplicants).',
       ),
     filter: z
       .string()
@@ -67,7 +68,12 @@ export const femaQueryDataset = tool('fema_query_dataset', {
     returned_count: z.number().describe('Number of records in this response.'),
   }),
   enrichment: {
-    notice: z.string().optional().describe('Guidance when no results were found.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance on an empty page — filter advice when nothing matches, or the total and last valid offset when offset is at or past the end.',
+      ),
     totalCount: z
       .number()
       .optional()
@@ -80,25 +86,59 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       reason: 'unknown_dataset',
       thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Dataset name not recognized by the OpenFEMA API.',
+      when: 'The dataset name is not in the OpenFEMA dataset catalog, or OpenFEMA has no endpoint for it.',
       recovery:
-        'Check the exact dataset entity name at https://www.fema.gov/about/openfema/data-sets. Names are case-sensitive (e.g., FimaNfipClaims not fimaNfipClaims).',
+        'Check the exact dataset entity name at https://www.fema.gov/about/openfema/data-sets. Names are case-sensitive (e.g., NfipClaims not nfipClaims).',
+    },
+    {
+      reason: 'catalog_unavailable',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      retryable: true,
+      when: 'The OpenFEMA dataset catalog could not be read, so the dataset API version is unknown.',
+      recovery:
+        'Retry the call in a few seconds; the dataset catalog is requested again on the next call.',
     },
     {
       reason: 'invalid_filter',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'OData filter expression could not be parsed by the API.',
+      when: 'OpenFEMA rejected the filter expression — an unknown field, a value of the wrong type or range, or unparseable syntax.',
       recovery:
-        'Fix the OData $filter syntax. String values must use single quotes. Check field names against the dataset schema at the FEMA OpenFEMA portal.',
+        "Fix the filter: put string values in single quotes (state eq 'TX', not state eq TX), compare numbers unquoted, and spell field names exactly as the dataset does (case-sensitive). Call fema_query_dataset with limit 1 and no filter to see the dataset's field names.",
+    },
+    {
+      reason: 'invalid_select',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'OpenFEMA rejected the select list — an unknown field or unparseable syntax.',
+      recovery:
+        "List field names separated by single commas, spelled exactly as the dataset does (case-sensitive). Call fema_query_dataset with limit 1 and no select to see the dataset's field names.",
+    },
+    {
+      reason: 'invalid_orderby',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'OpenFEMA rejected the orderby expression — an unknown field or unparseable syntax.',
+      recovery:
+        "Use a field name spelled exactly as the dataset does, optionally followed by asc or desc (e.g., declarationDate desc). Call fema_query_dataset with limit 1 to see the dataset's field names.",
+    },
+    {
+      reason: 'invalid_odata_syntax',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'OpenFEMA could not parse the request and did not say whether filter, select, or orderby was at fault.',
+      recovery:
+        'Retry with one of filter, select, or orderby at a time to find the one OpenFEMA cannot parse, then fix its syntax: quoted strings, exact field names, comma-separated select fields.',
     },
   ],
 
   async handler(input, ctx) {
     const svc = getOpenFemaService();
 
-    // The service's fetchDataset will throw with reason 'unknown_dataset' or 'invalid_filter'
-    // when the API returns the appropriate error shapes — those bubble unchanged.
+    // fetchDataset resolves the dataset's API version from the OpenFEMA catalog and throws the
+    // contract's service reasons (unknown_dataset, catalog_unavailable, invalid_filter,
+    // invalid_select, invalid_orderby, invalid_odata_syntax) — those bubble unchanged.
     const { rows, count } = await svc.fetchDataset<Record<string, unknown>>(
       input.dataset,
       {
@@ -113,7 +153,9 @@ export const femaQueryDataset = tool('fema_query_dataset', {
 
     if (rows.length === 0) {
       ctx.enrich.notice(
-        `No records found in dataset "${input.dataset}" with the given filters. Check field names and filter syntax.`,
+        count === 0
+          ? `No records found in dataset "${input.dataset}" with the given filters. Check field names and filter syntax.`
+          : `Offset ${input.offset} is past the end of the ${count} matching records; the last valid offset is ${count - 1}.`,
       );
     }
 
@@ -138,7 +180,11 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       `**${result.returned_count} of ${result.total_count} records** from \`${result.dataset}\`\n`,
     );
     if (result.rows.length === 0) {
-      lines.push('_No records returned._');
+      lines.push(
+        result.total_count === 0
+          ? '_No records returned._'
+          : '_This page is empty: the offset is past the end of the matching records._',
+      );
     } else {
       const headers = Object.keys(result.rows[0] ?? {});
       if (headers.length > 0 && result.rows.length <= 50) {

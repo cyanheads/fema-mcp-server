@@ -40,5 +40,5 @@ await createApp({
     setCanvas(core.canvas);
   },
   instructions:
-    'Start with fema_search_disasters and use the disaster number to join declarations with public and housing assistance. For NFIP claims, supply a state filter; when results include a canvas_id, inspect columns with fema_dataframe_describe before querying with fema_dataframe_query. Use fema_query_dataset for other OpenFEMA v2 datasets.',
+    'Start with fema_search_disasters and use the disaster number to join declarations with public and housing assistance. For NFIP claims, supply a state filter; when results include a canvas_id, inspect columns with fema_dataframe_describe before querying with fema_dataframe_query. Use fema_query_dataset for any other dataset in the OpenFEMA catalog.',
 });

@@ -1,185 +1,363 @@
 /**
- * @fileoverview Tests for fema_query_dataset tool — generic escape hatch.
+ * @fileoverview Tests for fema_query_dataset — the generic escape hatch — run through the
+ * tool contract (schema → handler → format → error envelope) against the real
+ * OpenFemaService, with `fetch` stubbed by bodies captured from the live OpenFEMA API.
  * @module tests/tools/fema-query-dataset.tool.test
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaQueryDataset } from '@/mcp-server/tools/definitions/fema-query-dataset.tool.js';
+import { initOpenFemaService } from '@/services/openfema/openfema-service.js';
+import {
+  CATALOG_URL,
+  calledUrls,
+  catalogResponse,
+  ERROR_BODIES,
+  endpoint,
+  envelopeResponse,
+  htmlResponse,
+  jsonResponse,
+  routeFetch,
+} from '../helpers/openfema-fixtures.js';
 
-vi.mock('@/services/openfema/openfema-service.js', () => {
-  let _mockSvc: Record<string, unknown>;
-  return {
-    getOpenFemaService: () => _mockSvc,
-    initOpenFemaService: () => {},
-    __setMock: (svc: Record<string, unknown>) => {
-      _mockSvc = svc;
-    },
-  };
-});
+const DDS = 'DisasterDeclarationsSummaries';
+const DDS_ROW = {
+  disasterNumber: 4781,
+  state: 'TX',
+  declarationDate: '2024-09-27T00:00:00.000Z',
+};
 
-async function setMock(impl: Record<string, unknown>) {
-  const mod = await import('@/services/openfema/openfema-service.js');
-  (mod as unknown as { __setMock: (s: Record<string, unknown>) => void }).__setMock(impl);
+type ErrorEnvelope = {
+  code: number;
+  message: string;
+  data: { reason?: string; code?: string; name?: string; recovery?: { hint: string } };
+};
+
+function recovery(reason: string): string {
+  const entry = femaQueryDataset.errors?.find((e) => e.reason === reason);
+  if (!entry) throw new Error(`test setup: no contract entry for reason "${reason}"`);
+  return entry.recovery;
 }
 
-describe('femaQueryDataset', () => {
-  beforeEach(async () => {
-    await setMock({
-      fetchDataset: vi.fn().mockResolvedValue({
-        rows: [{ disasterNumber: 4781, state: 'TX', declarationDate: '2024-09-27T00:00:00.000Z' }],
-        count: 1,
-      }),
-    });
-  });
+function contentText(result: { content: unknown[] }): string {
+  return (result.content as Array<{ type: string; text?: string }>)
+    .map((block) => block.text ?? '')
+    .join('\n');
+}
 
-  it('returns rows and count for a valid dataset', async () => {
-    const ctx = createMockContext({ errors: femaQueryDataset.errors });
-    const input = femaQueryDataset.input.parse({
-      dataset: 'DisasterDeclarationsSummaries',
+function errorOf(result: { structuredContent?: unknown }): ErrorEnvelope {
+  return (result.structuredContent as { error: ErrorEnvelope }).error;
+}
+
+let fetchMock: Mock;
+
+beforeEach(() => {
+  fetchMock = vi.fn().mockRejectedValue(new Error('unmocked fetch'));
+  vi.stubGlobal('fetch', fetchMock);
+  initOpenFemaService({} as unknown as AppConfig, {} as unknown as StorageService);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('fema_query_dataset — success', () => {
+  it('returns rows on both client surfaces for a v2 dataset', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => envelopeResponse(DDS, [DDS_ROW], 1)],
+      ]),
+    );
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
       filter: "state eq 'TX'",
       limit: 10,
     });
-    const result = await femaQueryDataset.handler(input, ctx);
-    expect(result.dataset).toBe('DisasterDeclarationsSummaries');
-    expect(result.rows).toHaveLength(1);
-    expect(result.total_count).toBe(1);
-    expect(result.returned_count).toBe(1);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      dataset: DDS,
+      rows: [DDS_ROW],
+      total_count: 1,
+      returned_count: 1,
+    });
+    const text = contentText(result);
+    expect(text).toContain(`1 of 1 records`);
+    expect(text).toContain('4781');
+    expect(text).toContain('declarationDate');
+    expect(result.structuredContent).not.toHaveProperty('notice');
   });
 
-  it('returns empty rows without throwing when count is 0', async () => {
-    await setMock({
-      fetchDataset: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
-    });
-    const ctx = createMockContext({ errors: femaQueryDataset.errors });
-    const input = femaQueryDataset.input.parse({
-      dataset: 'DisasterDeclarationsSummaries',
-      limit: 100,
-    });
-    const result = await femaQueryDataset.handler(input, ctx);
-    expect(result.rows).toHaveLength(0);
-    expect(result.returned_count).toBe(0);
-  });
-
-  it('propagates unknown_dataset error from service', async () => {
-    const unknownDatasetError = new McpError(
-      JsonRpcErrorCode.NotFound,
-      'Dataset "BadName" not found',
-      { reason: 'unknown_dataset', dataset: 'BadName' },
+  it.each([
+    ['FemaWebDeclarationAreas', 1],
+    ['NfipClaims', 3],
+    ['HazardMitigationGrantProgramDisasterSummaries', 3],
+  ])('queries %s at v%i from the catalog', async (dataset, version) => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [
+          endpoint(dataset, version),
+          () => envelopeResponse(dataset, [{ id: 7 }], 1, `v${version}`),
+        ],
+      ]),
     );
-    await setMock({
-      fetchDataset: vi.fn().mockRejectedValue(unknownDatasetError),
-    });
-    const ctx = createMockContext({ errors: femaQueryDataset.errors });
-    const input = femaQueryDataset.input.parse({ dataset: 'BadName' });
-    await expect(femaQueryDataset.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'unknown_dataset' },
-    });
+    const result = await runToolContract(femaQueryDataset, { dataset, limit: 1 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ dataset, rows: [{ id: 7 }] });
+    expect(calledUrls(fetchMock)[1]?.startsWith(endpoint(dataset, version))).toBe(true);
   });
 
-  it('unknown_dataset error message does not leak transport detail (regression #10)', async () => {
-    // The error message must not contain internal transport wording ("HTML instead of JSON")
-    // but must preserve data.reason:'unknown_dataset' for structured consumers.
-    const unknownDatasetError = new McpError(
-      JsonRpcErrorCode.NotFound,
-      'Dataset "NotARealDataset123" not found. Check the dataset name and verify it matches a valid OpenFEMA v2 entity name (e.g., FimaNfipClaims, DisasterDeclarationsSummaries).',
-      { reason: 'unknown_dataset', dataset: 'NotARealDataset123' },
+  it('empty result: no rows on either surface, with an explanatory notice', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => envelopeResponse(DDS, [], 0)],
+      ]),
     );
-    await setMock({
-      fetchDataset: vi.fn().mockRejectedValue(unknownDatasetError),
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
+      filter: "state eq 'ZZ'",
     });
-    const ctx = createMockContext({ errors: femaQueryDataset.errors });
-    const input = femaQueryDataset.input.parse({ dataset: 'NotARealDataset123' });
-    let caught: unknown;
-    try {
-      await femaQueryDataset.handler(input, ctx);
-    } catch (e) {
-      caught = e;
+    expect(result.isError).not.toBe(true);
+    const notice = `No records found in dataset "${DDS}" with the given filters. Check field names and filter syntax.`;
+    expect(result.structuredContent).toMatchObject({
+      rows: [],
+      total_count: 0,
+      returned_count: 0,
+      notice,
+    });
+    const text = contentText(result);
+    expect(text).toContain('No records returned');
+    expect(text).toContain(notice);
+  });
+
+  it('cap reached: returned_count equals the limit and the total discloses the rest', async () => {
+    const rows = Array.from({ length: 3 }, (_, i) => ({ ...DDS_ROW, disasterNumber: 4700 + i }));
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => envelopeResponse(DDS, rows, 195)],
+      ]),
+    );
+    const result = await runToolContract(femaQueryDataset, { dataset: DDS, limit: 3 });
+    expect(result.structuredContent).toMatchObject({
+      total_count: 195,
+      returned_count: 3,
+      totalCount: 195,
+    });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(contentText(result)).toContain('3 of 195 records');
+    expect(calledUrls(fetchMock)[1]).toContain('%24top=3&%24skip=0');
+  });
+
+  it('offset past the end: empty page with the full total', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => envelopeResponse(DDS, [], 195)],
+      ]),
+    );
+    const result = await runToolContract(femaQueryDataset, { dataset: DDS, offset: 5000 });
+    expect(result.isError).not.toBe(true);
+    const notice =
+      'Offset 5000 is past the end of the 195 matching records; the last valid offset is 194.';
+    expect(result.structuredContent).toMatchObject({
+      rows: [],
+      total_count: 195,
+      returned_count: 0,
+      totalCount: 195,
+      notice,
+    });
+    const text = contentText(result);
+    expect(text).toContain('0 of 195 records');
+    expect(text).toContain(notice);
+    expect(text).not.toMatch(/\bno\b[^.\n]*\brecords\b/i);
+    expect(calledUrls(fetchMock)[1]).toContain('%24skip=5000');
+  });
+
+  it('offset exactly at the total is past the end', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => envelopeResponse(DDS, [], 195)],
+      ]),
+    );
+    const result = await runToolContract(femaQueryDataset, { dataset: DDS, offset: 195 });
+    expect((result.structuredContent as { notice: string }).notice).toContain(
+      'last valid offset is 194',
+    );
+  });
+
+  it('invalid input is rejected before any request', async () => {
+    const result = await runToolContract(femaQueryDataset, { dataset: DDS, limit: 0 });
+    expect(result.isError).toBe(true);
+    expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('fema_query_dataset — error contract on the wire', () => {
+  function reject400(body: unknown) {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => jsonResponse(400, body)],
+      ]),
+    );
+  }
+
+  /** The #4 / #2 / #15 invariants on both surfaces. */
+  function expectSanitized(result: Awaited<ReturnType<typeof runToolContract>>, reason: string) {
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe(reason);
+    expect(error.data.recovery?.hint).toBe(recovery(reason));
+    expect(error.data).not.toHaveProperty('name');
+    const text = contentText(result);
+    for (const surface of [error.message, text]) {
+      expect(surface).not.toMatch(/at \d+/);
+      expect(surface).not.toContain('[undefined]');
+      expect(surface).not.toMatch(/Int32|Int16|SByte|Byte\b/);
     }
-    expect(caught).toBeDefined();
-    const err = caught as McpError;
-    // data.reason preserved
-    expect(err.data).toMatchObject({ reason: 'unknown_dataset', dataset: 'NotARealDataset123' });
-    // message must not expose transport internals
-    expect(err.message).not.toContain('HTML');
-    expect(err.message).not.toContain('instead of JSON');
-    // message must be actionable
-    expect(err.message).toContain('NotARealDataset123');
+    expect(text).toContain(recovery(reason));
+    expect(text).toContain(`reason ${reason}`);
+    return { error, text };
+  }
+
+  it('unknown select field → invalid_select', async () => {
+    reject400(ERROR_BODIES.selectUnknownField);
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
+      select: 'disasterNumber,bogusField',
+      limit: 1,
+    });
+    const { error } = expectSanitized(result, 'invalid_select');
+    expect(error.data.code).toBe('OF_OQP_003');
+    expect(error.message).toContain('select');
+    expect(error.message).toContain('bogusField');
+    expect(error.message).not.toContain('$filter');
   });
 
-  it('propagates invalid_filter error from service', async () => {
-    const invalidFilterError = new McpError(JsonRpcErrorCode.InvalidParams, 'OData parse error', {
-      reason: 'invalid_filter',
-      code: 'OF_OQP_002',
+  it('unknown orderby field → invalid_orderby', async () => {
+    reject400(ERROR_BODIES.orderbyUnknownField);
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
+      orderby: 'bogusField desc',
+      limit: 1,
     });
-    await setMock({
-      fetchDataset: vi.fn().mockRejectedValue(invalidFilterError),
-    });
-    const ctx = createMockContext({ errors: femaQueryDataset.errors });
-    const input = femaQueryDataset.input.parse({
-      dataset: 'DisasterDeclarationsSummaries',
-      filter: 'INVALID_FIELD eq 1',
-    });
-    await expect(femaQueryDataset.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
-      data: { reason: 'invalid_filter' },
-    });
+    const { error } = expectSanitized(result, 'invalid_orderby');
+    expect(error.data.code).toBe('OF_OQP_001');
+    expect(error.message).toContain('orderby');
+    expect(error.message).toContain('bogusField');
   });
 
-  it('service sanitizes raw parser error message into actionable text', async () => {
-    // Simulate the raw error the service would have thrown before sanitization;
-    // after the fix the service builds a clean message — verify it doesn't contain
-    // internal position offsets or undefined codes.
-    const sanitizedError = new McpError(
-      JsonRpcErrorCode.InvalidParams,
-      "Invalid OData $filter expression. String values must use single quotes; field names are case-sensitive. Example: state eq 'TX' and declarationDate ge '2024-01-01T00:00:00.000Z'",
-      { reason: 'invalid_filter', code: undefined, name: undefined },
-    );
-    await setMock({
-      fetchDataset: vi.fn().mockRejectedValue(sanitizedError),
+  it('unquoted string in a filter → invalid_filter naming the value read as a field', async () => {
+    reject400(ERROR_BODIES.filterUnquotedString);
+    const result = await runToolContract(femaQueryDataset, { dataset: DDS, filter: 'state eq TX' });
+    const { error } = expectSanitized(result, 'invalid_filter');
+    expect(error.data.code).toBe('OF_OQP_002');
+    expect(error.message).toContain('"TX"');
+    expect(recovery('invalid_filter')).toContain("state eq 'TX'");
+  });
+
+  it('fyDeclared overflow → names fyDeclared, never the disaster number', async () => {
+    reject400(ERROR_BODIES.filterFyDeclaredOverflow);
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
+      filter: 'fyDeclared eq 40000',
     });
-    const ctx = createMockContext({ errors: femaQueryDataset.errors });
-    const input = femaQueryDataset.input.parse({
-      dataset: 'DisasterDeclarationsSummaries',
+    const { error, text } = expectSanitized(result, 'invalid_filter');
+    expect(error.message).toContain('fyDeclared');
+    expect(text).not.toMatch(/disaster number/i);
+  });
+
+  it('disasterNumber overflow keeps the FEMA range sentence', async () => {
+    reject400(ERROR_BODIES.filterDisasterNumberOverflow);
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
+      filter: 'disasterNumber eq 32768',
+    });
+    const { error } = expectSanitized(result, 'invalid_filter');
+    expect(error.message).toBe('Disaster number is outside the valid FEMA range (1–32767).');
+  });
+
+  it('untyped parser error with one expression → that expression’s reason, no upstream code', async () => {
+    reject400(ERROR_BODIES.untypedUnexpectedCharacter);
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
       filter: 'INVALID FILTER EXPRESSION',
     });
-    let caught: unknown;
-    try {
-      await femaQueryDataset.handler(input, ctx);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
-    // Verify the message doesn't contain internal parse-position offsets
-    const message = (caught as McpError).message;
-    expect(message).not.toMatch(/at \d+/);
-    expect(message).not.toContain('[undefined]');
-    expect(message).toContain('$filter');
+    const { error } = expectSanitized(result, 'invalid_filter');
+    expect(error.data).not.toHaveProperty('code');
+    expect(error.message).toContain('filter');
   });
 
-  it('formats small result sets as markdown table', () => {
-    const output = {
-      dataset: 'DisasterDeclarationsSummaries',
-      rows: [
-        { disasterNumber: '4781', state: 'TX' },
-        { disasterNumber: '4782', state: 'FL' },
-      ],
-      total_count: 2,
-      returned_count: 2,
-    };
-    const blocks = femaQueryDataset.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('DisasterDeclarationsSummaries');
-    expect(text).toContain('disasterNumber');
-    expect(text).toContain('4781');
-    expect(text).toContain('TX');
+  it('untyped parser error with several expressions → invalid_odata_syntax naming each', async () => {
+    reject400(ERROR_BODIES.untypedFailAtZero);
+    const result = await runToolContract(femaQueryDataset, {
+      dataset: DDS,
+      filter: 'INVALID FILTER EXPRESSION',
+      select: 'disasterNumber,,',
+    });
+    const { error } = expectSanitized(result, 'invalid_odata_syntax');
+    expect(error.data).not.toHaveProperty('code');
+    expect(error.message).toContain('filter');
+    expect(error.message).toContain('select');
   });
 
+  it('a name missing from the catalog → unknown_dataset without a data request (regression #10)', async () => {
+    fetchMock.mockImplementation(routeFetch([[CATALOG_URL, () => catalogResponse()]]));
+    const result = await runToolContract(femaQueryDataset, { dataset: 'NotARealDataset123' });
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'unknown_dataset',
+      recovery: { hint: recovery('unknown_dataset') },
+    });
+    const text = contentText(result);
+    expect(text).toContain('NotARealDataset123');
+    expect(text).not.toContain('HTML');
+    expect(text).not.toContain('instead of JSON');
+    expect(text).not.toMatch(/\bv2\b/);
+    expect(calledUrls(fetchMock)).toHaveLength(1);
+  });
+
+  it('an HTML 404 from a listed dataset → unknown_dataset', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint('FimaNfipPolicies', 2), () => htmlResponse(404)],
+      ]),
+    );
+    const result = await runToolContract(femaQueryDataset, { dataset: 'FimaNfipPolicies' });
+    expect(errorOf(result).data.reason).toBe('unknown_dataset');
+  });
+
+  it('an unreadable catalog with nothing cached → catalog_unavailable', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([[CATALOG_URL, () => new Response('down', { status: 503 })]]),
+    );
+    const result = await runToolContract(femaQueryDataset, { dataset: DDS });
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({
+      reason: 'catalog_unavailable',
+      recovery: { hint: recovery('catalog_unavailable') },
+    });
+    expect(contentText(result)).toContain(recovery('catalog_unavailable'));
+  });
+});
+
+describe('fema_query_dataset — format', () => {
   it('renders every selected field for large (>50-row) result sets, not just the first six (regression #18)', () => {
-    // The >50-row branch previously capped each row at Object.entries(row).slice(0, 6),
-    // dropping every field past the sixth from content[] while structuredContent kept them all.
     const rows = Array.from({ length: 51 }, (_, i) => ({
       disasterNumber: 4700 + i,
       declarationTitle: 'SEVERE STORMS',
@@ -190,31 +368,15 @@ describe('femaQueryDataset', () => {
       ihProgramDeclared: false,
       paProgramDeclared: true,
     }));
-    const output = {
-      dataset: 'DisasterDeclarationsSummaries',
+    const blocks = femaQueryDataset.format!({
+      dataset: DDS,
       rows,
       total_count: 51,
       returned_count: 51,
-    };
-    const blocks = femaQueryDataset.format!(output);
+    });
     const text = (blocks[0] as { text: string }).text;
-    // 7th and 8th selected fields — dropped by the old six-field slice — must reach content[].
     expect(text).toContain('ihProgramDeclared: false');
     expect(text).toContain('paProgramDeclared: true');
-    // Parity: every row carries all selected fields (one compact line per row, all 51 rows).
     expect((text.match(/paProgramDeclared: true/g) ?? []).length).toBe(51);
-  });
-
-  it('formats empty result', () => {
-    const output = {
-      dataset: 'FimaNfipPolicies',
-      rows: [],
-      total_count: 0,
-      returned_count: 0,
-    };
-    const blocks = femaQueryDataset.format!(output);
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('FimaNfipPolicies');
-    expect(text).toContain('No records');
   });
 });
