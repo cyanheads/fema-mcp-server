@@ -48,6 +48,9 @@ function v3Claim(i: number) {
 }
 
 const NFIP_V3 = endpoint('NfipClaims', 3);
+/** The 12 fields the tool reads, as `encodeURIComponent` puts them on the wire. */
+const SELECT =
+  'state%2CcountyCode%2CreportedZipCode%2CdateOfLoss%2CyearOfLoss%2CamountPaidOnBuildingClaim%2CamountPaidOnContentsClaim%2CbuildingDamageAmount%2CcontentsDamageAmount%2CratedFloodZone%2CcauseOfDamage%2CoccupancyType';
 
 let fetchMock: Mock;
 
@@ -106,14 +109,38 @@ describe('fema_search_nfip — NfipClaims v3, canvas disabled', () => {
     expect(text).toContain('2 of 58004 NFIP claims');
     expect(text).toContain('County: 48201');
     expect(text).toContain('Bldg Paid: $1,250.5');
-    expect(text).toContain('Showing 2 of 58004 matching claims');
+    expect(text).toContain(
+      'Returned 2 of the 58004 matching claims from offset 0; continue with offset 2.',
+    );
 
     const urls = calledUrls(fetchMock);
     expect(urls).toHaveLength(1);
     expect(urls[0]).toBe(
-      "https://www.fema.gov/api/open/v3/NfipClaims?%24inlinecount=allpages&%24filter=state%20eq%20'TX'%20and%20countyCode%20eq%20'48201'%20and%20yearOfLoss%20ge%202017&%24orderby=dateOfLoss%20desc&%24top=2",
+      `https://www.fema.gov/api/open/v3/NfipClaims?%24inlinecount=allpages&%24filter=state%20eq%20'TX'%20and%20countyCode%20eq%20'48201'%20and%20yearOfLoss%20ge%202017&%24select=${SELECT}&%24orderby=dateOfLoss%20desc%2Cid&%24top=2&%24skip=0`,
     );
     expect(urls.some((u) => u.startsWith(CATALOG_URL))).toBe(false);
+  });
+
+  it('keeps a $0 payment as 0 on both surfaces, and no description calls it absent', async () => {
+    setCanvas(undefined);
+    const zeroPaid = { ...v3Claim(0), amountPaidOnBuildingClaim: 0, amountPaidOnContentsClaim: 0 };
+    fetchMock.mockImplementation(
+      routeFetch([[NFIP_V3, () => envelopeResponse('NfipClaims', [zeroPaid], 1, 'v3')]]),
+    );
+    const result = await runToolContract(femaSearchNfip, { state: 'TX', limit: 1 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      claims: [{ amount_paid_building: 0, amount_paid_contents: 0 }],
+    });
+    const text = (result.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n');
+    expect(text).toContain('Bldg Paid: $0');
+    expect(text).toContain('Contents Paid: $0');
+
+    const claim = femaSearchNfip.output.shape.claims.element.shape;
+    for (const field of ['amount_paid_building', 'amount_paid_contents'] as const) {
+      expect(claim[field].description, field).not.toMatch(/absent when zero/i);
+      expect(claim[field].description, field).toMatch(/\b0\b/);
+    }
   });
 });
 
@@ -156,7 +183,12 @@ describe('fema_search_nfip — NfipClaims v3, DuckDB canvas', () => {
         canvas_table: string;
         claims: unknown[];
       };
-      expect(out).toMatchObject({ spilled: true, total_count: 7000, returned_count: 5 });
+      expect(out).toMatchObject({
+        spilled: true,
+        total_count: 7000,
+        staged_count: 7000,
+        returned_count: 5,
+      });
       expect(out.claims).toHaveLength(5);
       const text = (result.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n');
       expect(text).toContain(out.canvas_id);
@@ -167,6 +199,8 @@ describe('fema_search_nfip — NfipClaims v3, DuckDB canvas', () => {
       for (const url of urls) {
         expect(url.startsWith(NFIP_V3)).toBe(true);
         expect(url).toContain('%24top=5000');
+        expect(url).toContain(`%24select=${SELECT}`);
+        expect(url).toContain('%24orderby=dateOfLoss%20desc%2Cid');
       }
 
       const described = await runToolContract(
