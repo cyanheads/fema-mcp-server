@@ -10,7 +10,7 @@
 | `fema_get_disaster` | Fetch all records for a specific disaster by disaster number (e.g., 4781). Returns every designated-area row for that declaration with programs activated, incident period, and county breakdowns. Chains to PA and housing assistance tools via the disaster number. | `disaster_number` | `readOnlyHint: true`, `openWorldHint: false` |
 | `fema_get_public_assistance` | Public-assistance funded projects for a disaster or state — where federal recovery money went. Returns applicant, damage category, project size/status, federal share obligated, and total obligated. Requires `disaster_number` or `state`. | `disaster_number`, `state`, `county`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: true` |
 | `fema_get_housing_assistance` | Individual-assistance housing data for a disaster. Returns IA housing grants by county/ZIP — owner and renter breakdowns, valid registrations, total approved IHP amounts, and repair/rental amounts. Covers HousingAssistanceOwners and HousingAssistanceRenters datasets. | `disaster_number`, `state`, `type` (owners/renters/both), `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: true` |
-| `fema_search_nfip` | National Flood Insurance Program claims for a state, county, or ZIP. Returns claim counts, amounts paid on building and contents claims, flood zones, and loss years. Large result sets spill to a DataCanvas table for SQL-based aggregation. Requires at least `state`. | `state`, `county_code`, `zip_code`, `year_from`, `year_to`, `limit`, `canvas_id` | `readOnlyHint: true`, `openWorldHint: true` |
+| `fema_search_nfip` | National Flood Insurance Program claims for a state, county, or ZIP. Returns the match count and claim records — amounts paid on building and contents claims, damage estimates, flood zones, cause and occupancy codes, loss dates — newest loss first, paged by `limit`/`offset` within a 100,000-character inline budget. A match over that budget is staged on a DataCanvas table for SQL-based aggregation. Requires at least `state`. | `state`, `county_code`, `zip_code`, `year_from`, `year_to`, `limit`, `offset`, `canvas_id` | `readOnlyHint: true`, `openWorldHint: true` |
 | `fema_dataframe_query` | Run a SELECT query against a DataCanvas table previously staged by `fema_search_nfip`. Enables aggregation, grouping, and time-series analysis over the full NFIP dataset without re-fetching. | `canvas_id`, `query` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` |
 | `fema_dataframe_describe` | List columns and row count for a DataCanvas table staged by `fema_search_nfip`. Use before `fema_dataframe_query` to discover the schema. | `canvas_id` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: false` |
 | `fema_query_dataset` | Generic OData query against any dataset in the OpenFEMA dataset catalog, at the API version the catalog lists for it — the escape hatch for datasets the convenience tools don't cover (NfipPolicies, IndividualAssistanceHousingRegistrantsLargeDisasters, etc.). Accepts raw `$filter`, `$select`, `$orderby`, and pagination params. | `dataset`, `filter`, `select`, `orderby`, `limit`, `offset` | `readOnlyHint: true`, `openWorldHint: true` |
@@ -19,7 +19,9 @@
 
 Domain failures each definition declares in `errors[]` (baseline codes — `InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError` — also bubble undeclared). Input-schema rejections — a missing required field, an out-of-range `limit`, a `date_from` that is not a `YYYY-MM-DD` calendar date — never reach a handler: they arrive as the framework's `invalid_arguments` reason with code `InvalidParams` and are not listed here.
 
-Paging past the end is never an error. On `fema_search_disasters`, `fema_get_public_assistance`, `fema_get_housing_assistance`, and `fema_query_dataset`, an `offset` at or past a non-zero total returns the empty page with its totals and one `notice` naming the total and the last valid offset. `fema_query_dataset` declares no `no_results`: a match with a total of 0 is also a success, with a `notice` pointing at field names and filter syntax.
+Paging past the end is never an error. On `fema_search_disasters`, `fema_get_public_assistance`, `fema_get_housing_assistance`, and `fema_query_dataset`, an `offset` at or past a non-zero total returns the empty page with its totals and one `notice` naming the total and the last valid offset. `fema_query_dataset` declares no `no_results`: a match with a total of 0 is also a success, with a `notice` pointing at field names and filter syntax. `fema_search_nfip` answers an `offset` past the end the same way, and stages no canvas for that page.
+
+`fema_search_disasters` pages declarations within the most recent 10,000 designated-area rows. When more rows match, it drops every row dated on the window's oldest day: all rows of a declaration share one `declarationDate`, so each returned declaration is complete, and the window is exactly the matches dated after that day. The response sets `truncated: true`, `format()` and the trailer word the declaration totals as lower bounds, and the `notice` names `date_to=<that day>` (inclusive through `23:59:59.999Z`), which continues with no gap or overlap. On an empty page past the end, that notice and the last-valid-offset sentence compose into one `notice`.
 
 | Definition | `reason` | Code | When |
 |:-----|:---------|:-----|:-----|
@@ -43,7 +45,8 @@ Paging past the end is never an error. On `fema_search_disasters`, `fema_get_pub
 | `fema_dataframe_describe` | `canvas_not_found` | `NotFound` | `canvas_id` names no active canvas session |
 | `fema_dataframe_drop` | `canvas_unavailable` | `ServiceUnavailable` | DataCanvas is disabled on this deployment |
 | `fema_dataframe_drop` | `canvas_not_found` | `NotFound` | `canvas_id` names no active canvas session |
-| `fema_query_dataset` | `unknown_dataset` | `NotFound` | The dataset name is not in the OpenFEMA dataset catalog (no data request is made), or OpenFEMA has no endpoint for it |
+| `fema_query_dataset` | `unknown_dataset` | `NotFound` | The dataset name is not in the OpenFEMA dataset catalog (no data request is made); a case-only mismatch names the catalog spelling |
+| `fema_query_dataset` | `dataset_not_served` | `NotFound` | The catalog lists the dataset, but OpenFEMA answers its API endpoint with the HTML 404 page (e.g., `PublicAssistanceProjectsStatus`). Raised only on this tool's path; the convenience tools' pinned datasets keep `unknown_dataset` |
 | `fema_query_dataset` | `catalog_unavailable` | `ServiceUnavailable` | The dataset catalog could not be read and no earlier copy is cached — retryable |
 | `fema_query_dataset` | `invalid_filter` | `ValidationError` | OpenFEMA 400 with `type: "$filter criteria error"` (unknown field, wrong value type, out-of-range integer, a quoted value that is not a date or GUID), or an untyped parser error when `filter` was the only expression sent |
 | `fema_query_dataset` | `invalid_select` | `ValidationError` | OpenFEMA 400 with `type: "$select criteria error"`, or an untyped parser error when `select` was the only expression sent |
@@ -103,7 +106,7 @@ This server fills the gap in the fleet's disaster coverage: `reliefweb` covers i
 
 `OpenFemaService` encapsulates the `%24`-encoded OData parameter building, pagination, error-shape detection (JSON 400 vs HTML 404), and retry logic. The convenience fetchers pin their entity and version (`DisasterDeclarationsSummaries` v2, `PublicAssistanceFundedProjectsDetails` v2, `HousingAssistanceOwners`/`Renters` v2, `NfipClaims` v3); `fetchDataset` (used by `fema_query_dataset`) resolves the version from the catalog.
 
-**Catalog cache.** One request to `v1/OpenFemaDataSets?$select=name,version,webService&$top=1000`, keyed on the `webService` path segment (so `OpenFemaDataSetFields` resolves, though its catalog `name` is `DataSetFields`), highest listed version per entity. The map lives in-process for 6 hours; concurrent callers share one in-flight refresh; a refresh is a single attempt with no retries. A failed refresh keeps serving the previous map and tries again after 5 minutes; with no map yet, the call fails `catalog_unavailable` and the next call tries again.
+**Catalog cache.** One request to `v1/OpenFemaDataSets?$select=name,version,webService&$top=1000`, keyed on both the `webService` path segment and the catalog `name`, highest listed version per key. OpenFEMA serves both: `OpenFemaDataSetFields` and `DataSetFields` (its catalog `name`). `OpenFemaDataSets` itself resolves at v1, although the catalog lists itself as `DataSets`. The map lives in-process for 6 hours; concurrent callers share one in-flight refresh; a refresh is a single attempt with no retries. A failed refresh keeps serving the previous map and tries again after 5 minutes; with no map yet, the call fails `catalog_unavailable` and the next call tries again.
 
 ---
 
@@ -111,7 +114,7 @@ This server fills the gap in the fleet's disaster coverage: `reliefweb` covers i
 
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
-| `CANVAS_PROVIDER_TYPE` | No | Set to `duckdb` to enable DataCanvas for NFIP analytics. Without it, `fema_search_nfip` inlines results up to the cap and omits `canvas_id`. |
+| `CANVAS_PROVIDER_TYPE` | No | Set to `duckdb` to enable DataCanvas for NFIP analytics. Without it, `fema_search_nfip` returns inline pages only (paged by `offset`) and omits `canvas_id`. |
 | `FEMA_BASE_URL` | No | Override the API root (default: `https://www.fema.gov/api/open`); each dataset's `/v<N>` is appended per request, and a trailing `/v<N>` on the override is dropped. Useful for test environments. |
 | `FEMA_REQUEST_TIMEOUT_MS` | No | HTTP request timeout in milliseconds (default: 30000). NFIP county queries can be slow. |
 
@@ -151,11 +154,12 @@ Each step is independently testable via the mock service pattern.
 
 | # | Call | Purpose | Condition |
 |:--|:-----|:--------|:----------|
-| 1 | `GET v3/NfipClaims?$filter=...&$top=N&$inlinecount=allpages` | Fetch filtered page of claims | always |
-| 2 | `spillover(rows, canvas)` | Stage full result set in DuckDB canvas table | when `canvas` enabled and count > inline cap |
-| 3 | Return inline preview + `canvas_id` | Agent sees compact summary; canvas enables SQL | when spilled |
+| 1 | `GET v3/NfipClaims?$filter=...&$select=<12 fields>&$orderby=dateOfLoss desc,id&$top=N&$skip=M&$inlinecount=allpages` | Fetch one ordered page of claims: `$skip=offset`, `$top=limit` (capped at the 409 rows that could fit the budget) without canvas or at an `offset` above 0; `$skip=0`, `$top=5000` with canvas at `offset` 0 | always |
+| 2 | Measure the page against the 100,000-character budget | Canvas enabled at `offset` 0: a match that is whole in the first page and fits returns its first `limit` claims with no canvas | always |
+| 3 | `canvas.acquire()` + `spillover(first page + later pages)` | Stage the match (up to 50,000 rows) in a DuckDB canvas table | canvas enabled, `offset` 0, and the first page proves the match overflows the budget |
+| 4 | Return the inline page, plus `canvas_id`/`canvas_table`/`staged_count` when staged | Agent sees a compact page; the canvas holds the rest for SQL | always |
 
-The service layer builds the `$filter` expression from `state`, `county_code`, `zip_code`, and year range. `state` is required — an unfiltered NFIP Claims fetch is 2.7M rows. The response always includes total count from `$inlinecount`. When canvas is disabled, the tool returns the inline page only and notes how to get more via pagination.
+The tool builds the `$filter` expression from `state`, `county_code`, `zip_code`, and year range. `state` is required — an unfiltered NFIP Claims fetch is 2.7M rows. `total_count` is OpenFEMA's `$inlinecount`, on every path. One `notice` covers the response: the offset to continue from when an unstaged page left claims out, the last valid offset when `offset` is past the end, or, after a spill, the canvas table with `fema_dataframe_describe` and then `fema_dataframe_query` (rows past the inline claims are read from the table). A minted canvas is dropped when staging fails or the request is aborted; a caller-supplied `canvas_id` is never dropped.
 
 ---
 
@@ -168,6 +172,8 @@ The service layer builds the `$filter` expression from `state`, `county_code`, `
 **`DisasterDeclarationsSummaries` returns one row per designated area.** A single declaration for a state yields dozens of rows — one per county or municipality designated. `fema_search_disasters` and `fema_get_disaster` surface this transparently: search returns deduplicated declaration-level summaries with `designatedAreaCount`; get_disaster returns all area rows. The design documents this behavior explicitly so agents aren't surprised.
 
 **DataCanvas for NFIP Claims, not for other datasets.** PA Projects (~1K/disaster) and Housing Assistance (~1K/disaster) fit inline. NFIP Claims is 2.7M rows with a genuinely analytical shape — agents would aggregate by flood zone, year, county, amount buckets. Canvas earns its keep here on both shape (SQL-worthy: GROUP BY, SUM, time-series) and size. PA and housing stay inline.
+
+**NFIP pages by `offset`; a canvas only for a match over the inline budget.** Every NFIP request orders by `dateOfLoss desc,id` (dates alone tie, up to 43 claims on one date in a county-year) and selects the 12 fields the tool reads, which cuts a 5,000-row page from ~12 MB to ~1.5 MB. A match that fits the 100,000-character budget arrives whole in the first 5,000-row page, so the tool decides before acquiring anything: forcing a spill to page a few hundred rows would spend a DuckDB instance and a tenant canvas slot on data that fits inline, and canvas-disabled deployments need `offset` regardless. Both deployments bound inline pages by the same character budget. Only a call at `offset` 0 stages: a later offset reads just its own page, so paging through a staged match never drains it again or takes another canvas slot.
 
 **`$inlinecount=allpages` on every query.** Without it, `metadata.count` is 0 and the agent can't assess result completeness or tell paging past the end from an empty match. The service sends it on every request; the overhead is minimal.
 
@@ -202,7 +208,7 @@ The service layer builds the `$filter` expression from `state`, `county_code`, `
 
 **Response envelope:**
 
-Request metadata is nested under `metadata`; the rows sit under a key named for the entity (the `webService` path segment). `metadata.count` is `0` without `$inlinecount=allpages`; send it on every query to get a real total.
+Request metadata is nested under `metadata`; the rows sit under a key named for the requested entity (`DataSetFields` for `/v1/DataSetFields`, `OpenFemaDataSetFields` for `/v1/OpenFemaDataSetFields`). `metadata.count` is `0` without `$inlinecount=allpages`; send it on every query to get a real total.
 
 ```json
 {

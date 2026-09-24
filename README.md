@@ -61,8 +61,8 @@ All resource data is also reachable via tools. Use `fema_get_disaster` for the s
 
 - Filters: `state` (2-letter code), `incident_type` (substring match), `declaration_type` (`DR`/`EM`/`FM`), `date_from`/`date_to` (inclusive declaration date range, calendar dates in `YYYY-MM-DD` form — anything else is rejected before a request is made), `county` (substring); paginated via `limit` (1–1000, default 50) / `offset`
 - Returns deduplicated declaration-level summaries — one row per unique disaster number, with `designated_area_count` and program flags (`ia_declared`/`pa_declared`/`hm_declared`)
-- Deduplicates the most recent 10,000 designated-area rows before paging; when `total_area_rows` exceeds 10,000, unique-declaration totals are lower bounds
-- An `offset` at or past the last matching declaration returns an empty page with the totals and a `notice` naming the last valid offset
+- Deduplicates the most recent 10,000 designated-area rows before paging. When `total_area_rows` exceeds 10,000, it drops the declarations dated on the oldest day in that window, so every returned declaration is complete; the response sets `truncated: true`, words its declaration totals as lower bounds, and its `notice` names the `date_to` (`YYYY-MM-DD`) that continues with older declarations
+- An `offset` at or past the last matching declaration returns an empty page with the totals and a `notice` naming the last valid offset (plus the `date_to` continuation when truncated)
 - Typed errors: `invalid_state`, `no_results` (nothing matches the filters)
 
 ---
@@ -96,9 +96,11 @@ All resource data is also reachable via tools. Use `fema_get_disaster` for the s
 ### `fema_search_nfip` <sub>tool</sub>
 
 - Reads OpenFEMA's `NfipClaims` v3 dataset (NFIP redacted claims)
-- `state` is required — the unfiltered NFIP Claims dataset is 2.7M rows; optional `county_code` (5-digit FIPS or a bare 3-digit code, auto-prefixed with the state FIPS), `zip_code`, `year_from`/`year_to`; inline preview capped at `limit` (1–10000, default 1000)
-- When `CANVAS_PROVIDER_TYPE=duckdb` is set and results exceed the 100,000-character inline preview budget, the matching set spills to a DataCanvas table (up to 50,000 rows) and the response carries `canvas_id`/`canvas_table`; `truncated: true` marks a partial stage at that cap
-- Without canvas enabled, results return inline only, bounded by `limit`
+- `state` is required — the unfiltered NFIP Claims dataset is 2.7M rows; optional `county_code` (5-digit FIPS or a bare 3-digit code, auto-prefixed with the state FIPS), `zip_code`, `year_from`/`year_to`; paginated via `limit` (1–10000, default 1000) / `offset`
+- Claims come newest date of loss first, with claim ID breaking ties, so offset pages never repeat or skip a claim. An inline page also stops at 100,000 characters of claims (about 330 claims); whenever claims are left out, a `notice` names the offset to continue from
+- `cause_of_damage` and `occupancy_type` carry OpenFEMA's published codes unchanged; the output schema lists what each code means
+- When `CANVAS_PROVIDER_TYPE=duckdb` is set and the match exceeds the inline budget, a call at `offset` 0 stages the whole match (up to 50,000 rows) on a DataCanvas table. The response carries `canvas_id`, `canvas_table`, and `staged_count`, and its `notice` points to `fema_dataframe_describe`, then `fema_dataframe_query`; rows past the inline claims are read from that table. `truncated: true` marks a partial stage at the cap, where `total_count` still reports the full match. A match that fits inline never creates a canvas, and a call at a later `offset` returns its inline page without staging
+- An `offset` at or past the last matching claim returns an empty page with the total and a `notice` naming the last valid offset
 - Typed errors: `invalid_state`, `no_results`
 
 ---
@@ -136,7 +138,8 @@ All four canvas inputs (`fema_search_nfip`, `fema_dataframe_describe`, `fema_dat
 - Each dataset is queried at the API version the [OpenFEMA dataset catalog](https://www.fema.gov/about/openfema/data-sets) lists for it (v1–v4, highest listed version wins); the catalog is cached in-process for 6 hours
 - Escape hatch for datasets the convenience tools don't cover (e.g. `NfipPolicies`, `IndividualAssistanceHousingRegistrantsLargeDisasters`, `FemaWebDeclarationAreas`); for `NfipPolicies` use `propertyState` (not `state`) and `reportedZipCode` — it has no `countyCode` — and always include a ZIP filter to avoid timeout
 - An empty page is a success with a `notice`: filter guidance when nothing matches (`total_count` 0), or the total and the last valid offset when `offset` is at or past the end of the matches
-- Typed errors: `unknown_dataset` (name not in the catalog), `catalog_unavailable` (catalog unreadable, retryable), `invalid_filter` / `invalid_select` / `invalid_orderby` (OpenFEMA rejected that parameter — the message names the field whenever OpenFEMA does), `invalid_odata_syntax` (unparseable, parameter not identified)
+- A dataset resolves by its `webService` path segment or its catalog `name` (`OpenFemaDataSetFields` or `DataSetFields`; `DataSets` or `OpenFemaDataSets` for the catalog itself)
+- Typed errors: `unknown_dataset` (name not in the catalog), `dataset_not_served` (listed in the catalog, but OpenFEMA serves no API endpoint for it), `catalog_unavailable` (catalog unreadable, retryable), `invalid_filter` / `invalid_select` / `invalid_orderby` (OpenFEMA rejected that parameter — the message names the field whenever OpenFEMA does), `invalid_odata_syntax` (unparseable, parameter not identified)
 
 ---
 
@@ -161,7 +164,7 @@ OpenFEMA-specific:
 Agent-friendly output:
 
 - Disaster number is the explicit join key across all datasets — every tool that touches a disaster surfaces it prominently so agents can chain calls without re-searching
-- Typed error contracts on every tool — `invalid_state`, `no_results`, `not_found`, `missing_filter`, `unknown_dataset`, `invalid_filter`, `invalid_select`, `invalid_orderby`, `invalid_odata_syntax`, `canvas_unavailable` — with recovery hints telling agents the concrete next step
+- Typed error contracts on every tool — `invalid_state`, `no_results`, `not_found`, `missing_filter`, `unknown_dataset`, `dataset_not_served`, `invalid_filter`, `invalid_select`, `invalid_orderby`, `invalid_odata_syntax`, `canvas_unavailable` — with recovery hints telling agents the concrete next step
 - `designated_area_count` on search results so agents know whether to drill in with `fema_get_disaster` without having to fetch the full record first
 
 ## Getting started
@@ -303,7 +306,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 |:---------|:------------|:--------|
 | `FEMA_BASE_URL` | Override the OpenFEMA API root. Each dataset's version is appended per request; a trailing `/v<N>` segment is ignored. | `https://www.fema.gov/api/open` |
 | `FEMA_REQUEST_TIMEOUT_MS` | Total budget in milliseconds for one upstream exchange, including response body, retries, and backoff. NFIP county queries can be slow. | `30000` |
-| `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas for NFIP Claims analytics. Without it, `fema_search_nfip` inlines results up to the cap. | — |
+| `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas for NFIP Claims analytics. Without it, `fema_search_nfip` returns inline pages only, paged by `offset`. | — |
 | `FEMA_ENABLE_CANVAS_DROP` | Enable the destructive `fema_dataframe_drop` tool for removing staged tables and views. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. Overrides this server's explicit stateless default. The framework schema default `auto` resolves to stateful. | `stateless` |
