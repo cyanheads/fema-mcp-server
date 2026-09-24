@@ -54,8 +54,8 @@ Keyless REST at `fema.gov/api/open/`, dozens of datasets with a shared OData-sty
 |:--------|:--------|
 | `DisasterDeclarationsSummaries` | Every federal disaster declaration — type, state, county, incident type, dates, programs |
 | `PublicAssistanceFundedProjectsDetails` | PA grants — where disaster recovery money went, by project |
-| `FimaNfipClaims` | National Flood Insurance Program claims (location, amount, date) |
-| `FimaNfipPolicies` | NFIP policies in force |
+| `NfipClaims` | National Flood Insurance Program claims (location, amount, date) |
+| `NfipPolicies` | NFIP policies in force |
 | `HousingAssistanceOwners` / `…Renters` | Individual-assistance housing data by disaster |
 
 The `$filter` grammar is the whole interface — one generic query tool covers the long tail; convenience tools cover the headline questions.

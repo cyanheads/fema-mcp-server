@@ -43,7 +43,7 @@ Federal disaster recovery data from FEMA's OpenFEMA API — disaster declaration
 | `fema_dataframe_describe` | List columns and row counts for DataCanvas tables staged by `fema_search_nfip` |
 | `fema_dataframe_query` | Run a SELECT query against a DataCanvas table staged by `fema_search_nfip` |
 | `fema_dataframe_drop` | Remove a staged DataCanvas table or view — opt-in, absent from `tools/list` by default |
-| `fema_query_dataset` | Generic OData query against any OpenFEMA v2 dataset — escape hatch for datasets the convenience tools don't cover |
+| `fema_query_dataset` | Generic OData query against any dataset in the OpenFEMA catalog — escape hatch for datasets the convenience tools don't cover |
 
 `fema_dataframe_drop` is registered only when `FEMA_ENABLE_CANVAS_DROP=true`; the other eight tools are always advertised.
 
@@ -59,10 +59,11 @@ All resource data is also reachable via tools. Use `fema_get_disaster` for the s
 
 ### `fema_search_disasters` <sub>tool</sub>
 
-- Filters: `state` (2-letter code), `incident_type` (substring match), `declaration_type` (`DR`/`EM`/`FM`), `date_from`/`date_to` (declaration date range), `county` (substring); paginated via `limit` (1–1000, default 50) / `offset`
+- Filters: `state` (2-letter code), `incident_type` (substring match), `declaration_type` (`DR`/`EM`/`FM`), `date_from`/`date_to` (inclusive declaration date range, calendar dates in `YYYY-MM-DD` form — anything else is rejected before a request is made), `county` (substring); paginated via `limit` (1–1000, default 50) / `offset`
 - Returns deduplicated declaration-level summaries — one row per unique disaster number, with `designated_area_count` and program flags (`ia_declared`/`pa_declared`/`hm_declared`)
 - Deduplicates the most recent 10,000 designated-area rows before paging; when `total_area_rows` exceeds 10,000, unique-declaration totals are lower bounds
-- Typed errors: `invalid_state`, `no_results`
+- An `offset` at or past the last matching declaration returns an empty page with the totals and a `notice` naming the last valid offset
+- Typed errors: `invalid_state`, `no_results` (nothing matches the filters)
 
 ---
 
@@ -78,20 +79,23 @@ All resource data is also reachable via tools. Use `fema_get_disaster` for the s
 
 - Requires `disaster_number` or `state` — at least one; optional `county` substring filter; paginated via `limit` (1–1000, default 100) / `offset`
 - Returns applicant, damage category, project size/status, federal share obligated, and total obligated per project
-- Typed errors: `invalid_state`, `missing_filter` (neither `disaster_number` nor `state` given), `no_results`
+- An `offset` at or past the last matching project returns an empty page with the total and a `notice` naming the last valid offset
+- Typed errors: `invalid_state`, `missing_filter` (neither `disaster_number` nor `state` given), `not_found` (disaster number above 32767, OpenFEMA's Int16 field limit — rejected before any request, same as `fema_get_disaster`), `no_results` (nothing matches the filters)
 
 ---
 
 ### `fema_get_housing_assistance` <sub>tool</sub>
 
 - Input: `disaster_number` (required), optional `state` filter, `type` (`owners`/`renters`/`both`, default `both`); paginated via `limit` (1–1000, default 100) / `offset`
-- Returns separate `owners` and `renters` arrays — registrations, approved amounts, and repair/rental/other-needs breakdowns by county and ZIP
-- Typed errors: `invalid_state`, `no_results` (IA housing data can take weeks to appear after a declaration)
+- Returns separate `owners` and `renters` arrays — registrations, approved amounts, and repair/rental/other-needs breakdowns by county and ZIP — plus `owners_count`/`renters_count` totals, both stated on every response
+- An `offset` at or past the end of a queried dataset returns that dataset's empty page with its total and a `notice` naming its last valid offset
+- Typed errors: `invalid_state`, `not_found` (disaster number above 32767, OpenFEMA's Int16 field limit — rejected before any request, same as `fema_get_disaster`), `no_results` (no records for the disaster — IA housing data can take weeks to appear after a declaration)
 
 ---
 
 ### `fema_search_nfip` <sub>tool</sub>
 
+- Reads OpenFEMA's `NfipClaims` v3 dataset (NFIP redacted claims)
 - `state` is required — the unfiltered NFIP Claims dataset is 2.7M rows; optional `county_code` (5-digit FIPS or a bare 3-digit code, auto-prefixed with the state FIPS), `zip_code`, `year_from`/`year_to`; inline preview capped at `limit` (1–10000, default 1000)
 - When `CANVAS_PROVIDER_TYPE=duckdb` is set and results exceed the 100,000-character inline preview budget, the matching set spills to a DataCanvas table (up to 50,000 rows) and the response carries `canvas_id`/`canvas_table`; `truncated: true` marks a partial stage at that cap
 - Without canvas enabled, results return inline only, bounded by `limit`
@@ -128,17 +132,19 @@ All four canvas inputs (`fema_search_nfip`, `fema_dataframe_describe`, `fema_dat
 
 ### `fema_query_dataset` <sub>tool</sub>
 
-- Input: `dataset` (case-sensitive OpenFEMA v2 entity name), optional raw OData `filter`/`select`/`orderby`, `limit` (1–10000, default 100) / `offset`
-- Escape hatch for datasets the convenience tools don't cover (e.g. `FimaNfipPolicies`, `IndividualAssistanceHousingRegistrantsLargeDisasters`); for NFIP Policies use `propertyState` (not `state`) and always include a county or ZIP filter to avoid timeout
-- Typed errors: `unknown_dataset` (name not recognized), `invalid_filter` (OData syntax error)
+- Input: `dataset` (case-sensitive OpenFEMA entity name), optional raw OData `filter`/`select`/`orderby`, `limit` (1–10000, default 100) / `offset`
+- Each dataset is queried at the API version the [OpenFEMA dataset catalog](https://www.fema.gov/about/openfema/data-sets) lists for it (v1–v4, highest listed version wins); the catalog is cached in-process for 6 hours
+- Escape hatch for datasets the convenience tools don't cover (e.g. `NfipPolicies`, `IndividualAssistanceHousingRegistrantsLargeDisasters`, `FemaWebDeclarationAreas`); for `NfipPolicies` use `propertyState` (not `state`) and `reportedZipCode` — it has no `countyCode` — and always include a ZIP filter to avoid timeout
+- An empty page is a success with a `notice`: filter guidance when nothing matches (`total_count` 0), or the total and the last valid offset when `offset` is at or past the end of the matches
+- Typed errors: `unknown_dataset` (name not in the catalog), `catalog_unavailable` (catalog unreadable, retryable), `invalid_filter` / `invalid_select` / `invalid_orderby` (OpenFEMA rejected that parameter — the message names the field whenever OpenFEMA does), `invalid_odata_syntax` (unparseable, parameter not identified)
 
 ---
 
 ### `fema://disaster/{disasterNumber}` <sub>resource</sub>
 
-- Params: `disasterNumber` as a string
+- Params: `disasterNumber` as a string of digits
 - Returns title, state, incident type, declaration type/date, incident period, `programs_declared` array, and `designated_area_count`
-- Disaster numbers above 32767 return not-found, same as `fema_get_disaster`
+- Typed error: `not_found` for a malformed number (anything but digits), a number outside 1–32767 (neither reaches OpenFEMA), or a number with no declaration — with a recovery hint pointing to `fema_search_disasters`
 
 ## Features
 
@@ -146,7 +152,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 OpenFEMA-specific:
 
-- Typed OpenFEMA REST client with `%24`-prefixed OData parameter encoding (an Akamai requirement) and structured error classification distinguishing JSON 400 responses from HTML Drupal error pages
+- Typed OpenFEMA REST client with `%24`-prefixed OData parameter encoding (an Akamai requirement), per-dataset API versions resolved from the OpenFEMA dataset catalog, and structured error classification distinguishing JSON 400 responses (by the failing `filter`/`select`/`orderby` clause) from HTML Drupal error pages
 - Automatic deduplication of `DisasterDeclarationsSummaries` — one row per designated area collapsed to declaration-level summaries with `designated_area_count`
 - NFIP Claims guard: `state` filter is required to prevent unbounded 2.7M-row fetches
 - DataCanvas spillover for NFIP analytics — large NFIP result sets materialize as DuckDB tables queryable via SQL without re-fetching
@@ -155,7 +161,7 @@ OpenFEMA-specific:
 Agent-friendly output:
 
 - Disaster number is the explicit join key across all datasets — every tool that touches a disaster surfaces it prominently so agents can chain calls without re-searching
-- Typed error contracts on every tool — `invalid_state`, `no_results`, `missing_filter`, `unknown_dataset`, `invalid_filter`, `canvas_unavailable` — with recovery hints telling agents the concrete next step
+- Typed error contracts on every tool — `invalid_state`, `no_results`, `not_found`, `missing_filter`, `unknown_dataset`, `invalid_filter`, `invalid_select`, `invalid_orderby`, `invalid_odata_syntax`, `canvas_unavailable` — with recovery hints telling agents the concrete next step
 - `designated_area_count` on search results so agents know whether to drill in with `fema_get_disaster` without having to fetch the full record first
 
 ## Getting started
@@ -295,7 +301,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 | Variable | Description | Default |
 |:---------|:------------|:--------|
-| `FEMA_BASE_URL` | Override the OpenFEMA API base URL. | `https://www.fema.gov/api/open/v2` |
+| `FEMA_BASE_URL` | Override the OpenFEMA API root. Each dataset's version is appended per request; a trailing `/v<N>` segment is ignored. | `https://www.fema.gov/api/open` |
 | `FEMA_REQUEST_TIMEOUT_MS` | Total budget in milliseconds for one upstream exchange, including response body, retries, and backoff. NFIP county queries can be slow. | `30000` |
 | `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas for NFIP Claims analytics. Without it, `fema_search_nfip` inlines results up to the cap. | — |
 | `FEMA_ENABLE_CANVAS_DROP` | Enable the destructive `fema_dataframe_drop` tool for removing staged tables and views. | `false` |
