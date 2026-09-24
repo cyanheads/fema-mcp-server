@@ -3,9 +3,17 @@
  * @module tests/resources/fema-disaster.resource.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaDisasterResource } from '@/mcp-server/resources/definitions/fema-disaster.resource.js';
+
+/** The resource's declared `not_found` recovery. */
+function notFoundRecovery(): string {
+  const entry = femaDisasterResource.errors?.find((e) => e.reason === 'not_found');
+  if (!entry) throw new Error('test setup: fema://disaster declares no not_found contract entry');
+  return entry.recovery;
+}
 
 interface DisasterSummary {
   designated_area_count: number;
@@ -62,7 +70,7 @@ describe('femaDisasterResource', () => {
   });
 
   it('returns disaster summary as JSON content', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: femaDisasterResource.errors });
     const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
     const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result).toMatchObject({
@@ -91,7 +99,7 @@ describe('femaDisasterResource', () => {
         count: 1,
       }),
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: femaDisasterResource.errors });
     const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
     const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result.programs_declared).toContain('IA');
@@ -110,26 +118,53 @@ describe('femaDisasterResource', () => {
         count: 3,
       }),
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: femaDisasterResource.errors });
     const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
     const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result.programs_declared).toContain('IA');
     expect(result.designated_area_count).toBe(3);
   });
 
-  it('throws NotFound for an invalid (non-numeric) disaster number', async () => {
-    const ctx = createMockContext();
-    const params = femaDisasterResource.params!.parse({ disasterNumber: 'abc' });
-    await expect(femaDisasterResource.handler(params, ctx)).rejects.toThrow();
+  it.each(['abc', '0', '4781abc', '-4781', '4781.5', ' 4781', '32768', '99999999999999999999'])(
+    'fails %j as not_found with the contract recovery, without calling OpenFEMA',
+    async (disasterNumber) => {
+      const fetchDisasters = vi.fn();
+      await setMock({ fetchDisasters });
+      const ctx = createMockContext({ errors: femaDisasterResource.errors });
+      const params = femaDisasterResource.params!.parse({ disasterNumber });
+      await expect(femaDisasterResource.handler(params, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'not_found', recovery: { hint: notFoundRecovery() } },
+      });
+      expect(fetchDisasters).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails an in-range number with no records as not_found with the contract recovery', async () => {
+    const fetchDisasters = vi.fn().mockResolvedValue({ rows: [], count: 0 });
+    await setMock({ fetchDisasters });
+    const ctx = createMockContext({ errors: femaDisasterResource.errors });
+    const params = femaDisasterResource.params!.parse({ disasterNumber: '9999' });
+    await expect(femaDisasterResource.handler(params, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.stringContaining('9999'),
+      data: { reason: 'not_found', recovery: { hint: notFoundRecovery() } },
+    });
+    expect(fetchDisasters).toHaveBeenCalledTimes(1);
   });
 
-  it('throws NotFound when the disaster number has no records', async () => {
-    await setMock({
-      fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+  it('reads 32767, the top of the FEMA range, from OpenFEMA', async () => {
+    const fetchDisasters = vi
+      .fn()
+      .mockResolvedValue({ rows: [makeDisasterRow({ disasterNumber: 32767 })], count: 1 });
+    await setMock({ fetchDisasters });
+    const ctx = createMockContext({ errors: femaDisasterResource.errors });
+    const params = femaDisasterResource.params!.parse({ disasterNumber: '32767' });
+    const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
+    expect(result.disaster_number).toBe(32767);
+    expect(fetchDisasters.mock.calls[0]?.[0]).toMatchObject({
+      filter: 'disasterNumber eq 32767',
     });
-    const ctx = createMockContext();
-    const params = femaDisasterResource.params!.parse({ disasterNumber: '9999' });
-    await expect(femaDisasterResource.handler(params, ctx)).rejects.toThrow();
   });
 
   it('handles sparse rows with missing optional fields', async () => {
@@ -146,7 +181,7 @@ describe('femaDisasterResource', () => {
         count: 1,
       }),
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: femaDisasterResource.errors });
     const params = femaDisasterResource.params!.parse({ disasterNumber: '4781' });
     const result = (await femaDisasterResource.handler(params, ctx)) as DisasterSummary;
     expect(result.title).toBe('SPARSE EVENT');

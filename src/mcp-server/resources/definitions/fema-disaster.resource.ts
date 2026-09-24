@@ -4,7 +4,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 
 export const femaDisasterResource = resource('fema://disaster/{disasterNumber}', {
@@ -17,22 +17,35 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
     disasterNumber: z
       .string()
       .describe(
-        'FEMA disaster number as a string (e.g., "4781"). Obtain from fema_search_disasters.',
+        'FEMA disaster number as a string of digits (e.g., "4781"), 1–32767. Obtain from fema_search_disasters.',
       ),
   }),
+  errors: [
+    {
+      reason: 'not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The disaster number is malformed, out of range, or matches no declaration.',
+      recovery:
+        'Use fema_search_disasters to find a valid FEMA disaster number, then read the resource with it.',
+    },
+  ],
 
   async handler(params, ctx) {
-    const num = parseInt(params.disasterNumber, 10);
-    if (Number.isNaN(num) || num <= 0) {
-      throw notFound(
-        `Invalid disaster number "${params.disasterNumber}". Expected a positive integer.`,
-        { disasterNumber: params.disasterNumber },
+    const raw = params.disasterNumber;
+    const num = Number(raw);
+    if (!/^\d+$/.test(raw) || num === 0) {
+      throw ctx.fail(
+        'not_found',
+        `Invalid disaster number "${raw}". Expected a positive integer.`,
+        { disasterNumber: raw, ...ctx.recoveryFor('not_found') },
       );
     }
-    // OpenFEMA's OData layer stores disasterNumber as Int16 (max 32767).
-    // Numbers above that produce a raw type-mismatch API error — treat as not-found.
+    // OpenFEMA stores disasterNumber as Int16; a larger number names no declaration.
     if (num > 32767) {
-      throw notFound(`Disaster number ${num} not found in FEMA records.`, { disasterNumber: num });
+      throw ctx.fail('not_found', `Disaster number ${raw} not found in FEMA records.`, {
+        disasterNumber: raw,
+        ...ctx.recoveryFor('not_found'),
+      });
     }
 
     const svc = getOpenFemaService();
@@ -49,10 +62,13 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
     );
 
     if (rows.length === 0) {
-      throw notFound(`Disaster number ${num} not found in FEMA records.`, { disasterNumber: num });
+      throw ctx.fail('not_found', `Disaster number ${num} not found in FEMA records.`, {
+        disasterNumber: num,
+        ...ctx.recoveryFor('not_found'),
+      });
     }
 
-    // biome-ignore lint/style/noNonNullAssertion: rows.length === 0 checked above via notFound throw
+    // biome-ignore lint/style/noNonNullAssertion: rows.length === 0 checked above via ctx.fail throw
     const first = rows[0]!;
     // OR program flags across all area-rows: declared for ANY area = declared for the disaster.
     const programs: string[] = [];
