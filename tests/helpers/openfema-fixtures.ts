@@ -6,6 +6,12 @@
 
 /** Rows from `GET /api/open/v1/OpenFemaDataSets?$select=name,version,webService`, in live order. */
 export const CATALOG_ROWS = [
+  /** Listed with `api: true`, but its endpoint answers every version with the HTML 404 page. */
+  {
+    name: 'PublicAssistanceProjectsStatus',
+    version: 1,
+    webService: 'https://www.fema.gov/api/open/v1/PublicAssistanceProjectsStatus',
+  },
   {
     name: 'HazardMitigationGrantProgramDisasterSummaries',
     version: 2,
@@ -16,11 +22,14 @@ export const CATALOG_ROWS = [
     version: 1,
     webService: 'https://www.fema.gov/api/open/v1/FemaWebDeclarationAreas',
   },
+  /** The one entry whose catalog `name` differs from its path segment; both serve the data. */
   {
     name: 'DataSetFields',
     version: 1,
     webService: 'https://www.fema.gov/api/open/v1/OpenFemaDataSetFields',
   },
+  /** The catalog's own entry, listed as `DataSets`; `OpenFemaDataSets` serves the same data. */
+  { name: 'DataSets', version: 1, webService: 'https://www.fema.gov/api/open/v1/DataSets' },
   { name: 'NfipPolicies', version: 3, webService: 'https://www.fema.gov/api/open/v3/NfipPolicies' },
   {
     name: 'DisasterDeclarationsSummaries',

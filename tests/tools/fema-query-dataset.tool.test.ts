@@ -112,6 +112,39 @@ describe('fema_query_dataset — success', () => {
     expect(calledUrls(fetchMock)[1]?.startsWith(endpoint(dataset, version))).toBe(true);
   });
 
+  it.each([
+    ['OpenFemaDataSets', 'name'],
+    ['DataSets', 'name'],
+    ['DataSetFields', 'name'],
+    ['OpenFemaDataSetFields', 'name'],
+  ])(
+    'returns rows for the metadata dataset %s at v1 on both surfaces (#33)',
+    async (dataset, field) => {
+      fetchMock.mockImplementation(
+        routeFetch([
+          // Ahead of the catalog route: the data request's query starts with $top, the catalog read's with $select.
+          [
+            `${endpoint(dataset, 1)}%24inlinecount=allpages&%24top=`,
+            () => envelopeResponse(dataset, [{ [field]: 'NfipClaims' }], 78, 'v1'),
+          ],
+          [CATALOG_URL, () => catalogResponse()],
+        ]),
+      );
+      const result = await runToolContract(femaQueryDataset, { dataset, limit: 1 });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        dataset,
+        rows: [{ name: 'NfipClaims' }],
+        total_count: 78,
+        returned_count: 1,
+      });
+      const text = contentText(result);
+      expect(text).toContain(`1 of 78 records`);
+      expect(text).toContain('NfipClaims');
+      expect(calledUrls(fetchMock)[1]?.startsWith(endpoint(dataset, 1))).toBe(true);
+    },
+  );
+
   it('empty result: no rows on either surface, with an explanatory notice', async () => {
     fetchMock.mockImplementation(
       routeFetch([
@@ -329,15 +362,52 @@ describe('fema_query_dataset — error contract on the wire', () => {
     expect(calledUrls(fetchMock)).toHaveLength(1);
   });
 
-  it('an HTML 404 from a listed dataset → unknown_dataset', async () => {
+  it('a case-only mismatch → unknown_dataset suggesting the catalog spelling, with no data request', async () => {
+    fetchMock.mockImplementation(routeFetch([[CATALOG_URL, () => catalogResponse()]]));
+    const result = await runToolContract(femaQueryDataset, { dataset: 'nfipClaims' });
+    const error = errorOf(result);
+    expect(error.data).toMatchObject({
+      reason: 'unknown_dataset',
+      recovery: { hint: recovery('unknown_dataset') },
+    });
+    expect(error.message).toContain('Did you mean "NfipClaims"?');
+    expect(contentText(result)).toContain('Did you mean "NfipClaims"?');
+    expect(calledUrls(fetchMock)).toHaveLength(1);
+  });
+
+  it('an HTML 404 from a catalog-listed dataset → dataset_not_served on both surfaces (#33)', async () => {
+    const dataset = 'PublicAssistanceProjectsStatus';
     fetchMock.mockImplementation(
       routeFetch([
         [CATALOG_URL, () => catalogResponse()],
-        [endpoint('FimaNfipPolicies', 2), () => htmlResponse(404)],
+        [endpoint(dataset, 1), () => htmlResponse(404)],
       ]),
     );
-    const result = await runToolContract(femaQueryDataset, { dataset: 'FimaNfipPolicies' });
-    expect(errorOf(result).data.reason).toBe('unknown_dataset');
+    const result = await runToolContract(femaQueryDataset, { dataset, limit: 1 });
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'dataset_not_served',
+      recovery: { hint: recovery('dataset_not_served') },
+    });
+    const text = contentText(result);
+    expect(text).toContain(dataset);
+    expect(text).toContain(recovery('dataset_not_served'));
+    expect(text).toContain('reason dataset_not_served');
+    for (const surface of [error.message, text]) {
+      expect(surface).not.toMatch(/spell|case-sensitive|Did you mean|HTML/i);
+    }
+  });
+
+  it('declares dataset_not_served and narrows unknown_dataset to names missing from the catalog', () => {
+    const entry = (reason: string) => femaQueryDataset.errors?.find((e) => e.reason === reason);
+    expect(entry('dataset_not_served')).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      thrownBy: 'service',
+    });
+    expect(entry('dataset_not_served')).not.toHaveProperty('retryable');
+    expect(entry('unknown_dataset')?.when).not.toMatch(/endpoint/i);
   });
 
   it('an unreadable catalog with nothing cached → catalog_unavailable', async () => {

@@ -18,7 +18,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
     'For NfipPolicies, use propertyState (not state) for the state and reportedZipCode for the ZIP code — it has no countyCode; ' +
     'always include a ZIP filter to avoid timeout. ' +
     'The dataset name must match the exact OpenFEMA entity name (case-sensitive, e.g., NfipClaims). ' +
-    'Names missing from the catalog return an unknown_dataset error.',
+    'Names missing from the catalog return an unknown_dataset error; a listed dataset OpenFEMA does not serve through the API returns dataset_not_served.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     dataset: z
@@ -86,9 +86,17 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       reason: 'unknown_dataset',
       thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The dataset name is not in the OpenFEMA dataset catalog, or OpenFEMA has no endpoint for it.',
+      when: 'The dataset name is not in the OpenFEMA dataset catalog.',
       recovery:
         'Check the exact dataset entity name at https://www.fema.gov/about/openfema/data-sets. Names are case-sensitive (e.g., NfipClaims not nfipClaims).',
+    },
+    {
+      reason: 'dataset_not_served',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The OpenFEMA dataset catalog lists the dataset, but OpenFEMA answers its API endpoint with a 404 page.',
+      recovery:
+        'The name is correct, but OpenFEMA does not serve this dataset through the API. Choose another dataset from https://www.fema.gov/about/openfema/data-sets.',
     },
     {
       reason: 'catalog_unavailable',
@@ -137,8 +145,8 @@ export const femaQueryDataset = tool('fema_query_dataset', {
     const svc = getOpenFemaService();
 
     // fetchDataset resolves the dataset's API version from the OpenFEMA catalog and throws the
-    // contract's service reasons (unknown_dataset, catalog_unavailable, invalid_filter,
-    // invalid_select, invalid_orderby, invalid_odata_syntax) — those bubble unchanged.
+    // contract's service reasons (unknown_dataset, dataset_not_served, catalog_unavailable,
+    // invalid_filter, invalid_select, invalid_orderby, invalid_odata_syntax) — those bubble unchanged.
     const { rows, count } = await svc.fetchDataset<Record<string, unknown>>(
       input.dataset,
       {

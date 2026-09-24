@@ -62,13 +62,19 @@ function isHtmlResponse(text: string): boolean {
 }
 
 /**
- * Map each catalog entry's `webService` path segment — the entity name the API
- * serves — to the highest version the catalog lists for it.
+ * The catalog endpoint. OpenFEMA serves it at v1, but the catalog lists itself as `DataSets`
+ * (`/v1/DataSets`, which serves the same rows).
+ */
+const CATALOG_DATASET = 'OpenFemaDataSets';
+const CATALOG_VERSION = 1;
+
+/**
+ * Map each catalog entry's `webService` path segment and its catalog `name` — OpenFEMA serves
+ * both (`OpenFemaDataSetFields` and `DataSetFields`) — to the highest version the catalog lists.
  */
 function buildVersionMap(rows: OpenFemaCatalogRow[]): Map<string, number> {
   const versions = new Map<string, number>();
-  for (const row of rows) {
-    const { version, webService } = row;
+  for (const { name, version, webService } of rows) {
     if (typeof webService !== 'string' || typeof version !== 'number') continue;
     if (!Number.isInteger(version) || version < 1) continue;
     const entity = webService
@@ -76,7 +82,9 @@ function buildVersionMap(rows: OpenFemaCatalogRow[]): Map<string, number> {
       .split('/')
       .filter(Boolean)
       .pop();
-    if (entity && version > (versions.get(entity) ?? 0)) versions.set(entity, version);
+    for (const key of [entity, typeof name === 'string' ? name : undefined]) {
+      if (key && version > (versions.get(key) ?? 0)) versions.set(key, version);
+    }
   }
   return versions;
 }
@@ -88,6 +96,20 @@ function unknownDataset(dataset: string, ctx: Context, detail: string): McpError
     ...ctx.recoveryFor('unknown_dataset'),
   });
 }
+
+/** Builds the error for an entity whose endpoint OpenFEMA answers with its 404 page. */
+type MissingEndpoint = (entity: string, ctx: Context) => McpError;
+
+/** A pinned or catalog entity with no endpoint. */
+const notAtOpenFema: MissingEndpoint = (entity, ctx) =>
+  unknownDataset(entity, ctx, 'was not found at OpenFEMA.');
+
+/** A name the catalog lists (so `resolveVersion` accepted it) whose endpoint is absent. */
+const notServed: MissingEndpoint = (dataset, ctx) =>
+  notFound(
+    `Dataset "${dataset}" is listed in the OpenFEMA dataset catalog, but OpenFEMA does not serve it through the API.`,
+    { reason: 'dataset_not_served', dataset, ...ctx.recoveryFor('dataset_not_served') },
+  );
 
 // --- OpenFEMA 400 classification ---
 
@@ -256,7 +278,9 @@ export class OpenFemaService {
     ctx: Context,
   ): Promise<{ rows: T[]; count: number }> {
     const version = await this.resolveVersion(dataset, ctx);
-    return this.request<T>(dataset, version, opts, ctx);
+    // The catalog lists itself only as `DataSets`, so its `OpenFemaDataSets` alias is no listed name.
+    const missing = dataset === CATALOG_DATASET ? notAtOpenFema : notServed;
+    return this.request<T>(dataset, version, opts, ctx, missing);
   }
 
   /** Fetch disaster declaration summaries. */
@@ -292,7 +316,10 @@ export class OpenFemaService {
     return this.request<RawNfipClaim>('NfipClaims', 3, opts, ctx);
   }
 
-  /** Resolve a dataset's API version from the catalog; an unlisted name is `unknown_dataset`. */
+  /**
+   * Resolve a dataset's API version from the catalog, by `webService` path segment or catalog
+   * `name`; an unlisted name is `unknown_dataset`.
+   */
   private async resolveVersion(dataset: string, ctx: Context): Promise<number> {
     let versions: ReadonlyMap<string, number>;
     try {
@@ -336,16 +363,17 @@ export class OpenFemaService {
   private async refreshCatalog(ctx: Context): Promise<ReadonlyMap<string, number>> {
     try {
       const { rows } = await this.exchange<OpenFemaCatalogRow>(
-        'OpenFemaDataSets',
-        1,
+        CATALOG_DATASET,
+        CATALOG_VERSION,
         { select: 'name,version,webService', top: 1000 },
         ctx,
-        { timeoutMs: this.timeoutMs },
+        { timeoutMs: this.timeoutMs, missing: notAtOpenFema },
       );
       const versions = buildVersionMap(rows);
       if (versions.size === 0) {
         throw serviceUnavailable('The OpenFEMA dataset catalog listed no usable datasets.');
       }
+      if (!versions.has(CATALOG_DATASET)) versions.set(CATALOG_DATASET, CATALOG_VERSION);
       this.catalog = { versions, expiresAt: Date.now() + CATALOG_TTL_MS };
       ctx.log.debug('OpenFEMA dataset catalog refreshed', { datasets: versions.size });
       return versions;
@@ -359,18 +387,23 @@ export class OpenFemaService {
     }
   }
 
-  /** Fetch one page of `entity` at `version`, retrying transient failures within the request budget. */
+  /**
+   * Fetch one page of `entity` at `version`, retrying transient failures within the request
+   * budget. `missing` builds the error for an endpoint OpenFEMA answers with its 404 page.
+   */
   private request<T>(
     entity: string,
     version: number,
     opts: OpenFemaQueryOptions,
     ctx: Context,
+    missing: MissingEndpoint = notAtOpenFema,
   ): Promise<{ rows: T[]; count: number }> {
     return withRetry(
       ({ signal, remainingMs }) =>
         this.exchange<T>(entity, version, opts, ctx, {
           signal,
           timeoutMs: Math.min(this.timeoutMs, remainingMs),
+          missing,
         }),
       {
         operation: `OpenFemaService.request(${entity} v${version})`,
@@ -388,7 +421,11 @@ export class OpenFemaService {
     version: number,
     opts: OpenFemaQueryOptions,
     ctx: Context,
-    { signal, timeoutMs }: { signal?: AbortSignal; timeoutMs: number },
+    {
+      signal,
+      timeoutMs,
+      missing,
+    }: { signal?: AbortSignal; timeoutMs: number; missing: MissingEndpoint },
   ): Promise<{ rows: T[]; count: number }> {
     const url = `${this.apiRoot}/v${version}/${entity}?${buildODataQuery(opts)}`;
     let response: Response;
@@ -407,7 +444,7 @@ export class OpenFemaService {
         status === 404 ||
         (status === 400 && (headers?.['content-type']?.includes('html') || isHtmlResponse(body)))
       ) {
-        throw unknownDataset(entity, ctx, 'was not found at OpenFEMA.');
+        throw missing(entity, ctx);
       }
       if (status === 400) {
         let parsed: OpenFemaErrorResponse | undefined;
@@ -431,7 +468,7 @@ export class OpenFemaService {
 
     const text = await response.text();
     if (response.headers.get('content-type')?.includes('html') || isHtmlResponse(text)) {
-      throw unknownDataset(entity, ctx, 'was not found at OpenFEMA.');
+      throw missing(entity, ctx);
     }
 
     let envelope: OpenFemaEnvelope;

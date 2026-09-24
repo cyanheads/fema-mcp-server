@@ -194,6 +194,7 @@ describe('convenience fetchers', () => {
       const error = await rejection(svc.fetchDisasters({ top: 1 }, createMockContext()));
       expect(error.code).toBe(JsonRpcErrorCode.NotFound);
       expect(error.data).toMatchObject({ reason: 'unknown_dataset', dataset: DDS });
+      expect(error.message).toBe(`Dataset "${DDS}" was not found at OpenFEMA.`);
       expect(error.message).not.toContain('HTML');
     }
   });
@@ -453,14 +454,19 @@ describe('fetchDataset — OpenFEMA 400 classification', () => {
 });
 
 describe('fetchDataset — catalog version resolution', () => {
+  /**
+   * Route the catalog read plus one data request. The data route matches on its query prefix
+   * (the catalog read sends `$select` there, a data request `$top`) and comes first, so an
+   * `OpenFemaDataSets` data request is not answered as the catalog read.
+   */
   function routeCatalogAnd(entity: string, version: number, rows: unknown[] = [{ id: 1 }]) {
     fetchMock.mockImplementation(
       routeFetch([
-        [CATALOG_URL, () => catalogResponse()],
         [
-          endpoint(entity, version),
+          `${endpoint(entity, version)}%24inlinecount=allpages&%24top=`,
           () => envelopeResponse(entity, rows, rows.length, `v${version}`),
         ],
+        [CATALOG_URL, () => catalogResponse()],
       ]),
     );
   }
@@ -500,11 +506,32 @@ describe('fetchDataset — catalog version resolution', () => {
     expect(calledUrls(fetchMock)[1]?.startsWith(endpoint(entity, 3))).toBe(true);
   });
 
-  it('keys on the webService path segment, not the catalog name', async () => {
-    fetchMock.mockImplementation(routeFetch([[CATALOG_URL, () => catalogResponse()]]));
-    const error = await rejection(svc.fetchDataset('DataSetFields', { top: 1 }, queryCtx()));
-    expect(error.data).toMatchObject({ reason: 'unknown_dataset' });
+  it.each([
+    ['DataSetFields', 'the catalog name of the OpenFemaDataSetFields path'],
+    ['DataSets', 'the catalog’s own entry'],
+    ['OpenFemaDataSets', 'the catalog endpoint, listed as DataSets'],
+  ])('resolves %s (%s) to v1 and reads the envelope keyed by that name', async (entity) => {
+    routeCatalogAnd(entity, 1);
+    await expect(svc.fetchDataset(entity, { top: 1 }, queryCtx())).resolves.toEqual({
+      rows: [{ id: 1 }],
+      count: 1,
+    });
+    expect(calledUrls(fetchMock)[1]?.startsWith(endpoint(entity, 1))).toBe(true);
   });
+
+  it.each([
+    ['datasetfields', 'DataSetFields'],
+    ['openfemadatasets', 'OpenFemaDataSets'],
+  ])(
+    'suggests the catalog spelling %s → %s for a case-only mismatch on an alias',
+    async (typed, suggested) => {
+      fetchMock.mockImplementation(routeFetch([[CATALOG_URL, () => catalogResponse()]]));
+      const error = await rejection(svc.fetchDataset(typed, { top: 1 }, queryCtx()));
+      expect(error.data).toMatchObject({ reason: 'unknown_dataset' });
+      expect(error.message).toContain(`"${suggested}"`);
+      expect(calledUrls(fetchMock)).toHaveLength(1);
+    },
+  );
 
   it('a name absent from the catalog → unknown_dataset with no data request', async () => {
     fetchMock.mockImplementation(routeFetch([[CATALOG_URL, () => catalogResponse()]]));
@@ -530,18 +557,50 @@ describe('fetchDataset — catalog version resolution', () => {
     expect(error.message).toContain('"NfipClaims"');
   });
 
-  it('a catalog-listed dataset whose endpoint 404s still maps to unknown_dataset', async () => {
+  it.each([
+    ['an HTML 404', () => htmlResponse(404)],
+    ['an HTML 400', () => htmlResponse(400)],
+    ['an HTML 200', () => htmlResponse(200)],
+  ])(
+    'a catalog-listed dataset whose endpoint answers %s → dataset_not_served, with no spelling advice',
+    async (_label, respond) => {
+      const dataset = 'PublicAssistanceProjectsStatus';
+      fetchMock.mockImplementation(
+        routeFetch([
+          [CATALOG_URL, () => catalogResponse()],
+          [endpoint(dataset, 1), respond],
+        ]),
+      );
+      const error = await rejection(svc.fetchDataset(dataset, { top: 1 }, queryCtx()));
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data).toMatchObject({
+        reason: 'dataset_not_served',
+        dataset,
+        recovery: { hint: contractRecovery('dataset_not_served') },
+      });
+      expect(error.message).toContain(dataset);
+      expect(error.message).toMatch(/catalog/);
+      for (const text of [error.message, contractRecovery('dataset_not_served')]) {
+        expect(text).not.toMatch(/spell|case-sensitive|Did you mean/i);
+      }
+      // Not retried: one catalog read, one data request.
+      expect(calledUrls(fetchMock)).toHaveLength(2);
+    },
+  );
+
+  it('an HTML 404 from OpenFemaDataSets, which the catalog lists only as DataSets → unknown_dataset', async () => {
     fetchMock.mockImplementation(
       routeFetch([
+        [
+          `${endpoint('OpenFemaDataSets', 1)}%24inlinecount=allpages&%24top=`,
+          () => htmlResponse(404),
+        ],
         [CATALOG_URL, () => catalogResponse()],
-        [endpoint('FimaNfipPolicies', 2), () => htmlResponse(404)],
       ]),
     );
-    const error = await rejection(svc.fetchDataset('FimaNfipPolicies', { top: 1 }, queryCtx()));
-    expect(error.data).toMatchObject({
-      reason: 'unknown_dataset',
-      recovery: { hint: contractRecovery('unknown_dataset') },
-    });
+    const error = await rejection(svc.fetchDataset('OpenFemaDataSets', { top: 1 }, queryCtx()));
+    expect(error.data).toMatchObject({ reason: 'unknown_dataset', dataset: 'OpenFemaDataSets' });
+    expect(error.message).toBe('Dataset "OpenFemaDataSets" was not found at OpenFEMA.');
   });
 
   it('two calls inside one cache window make one catalog request', async () => {
