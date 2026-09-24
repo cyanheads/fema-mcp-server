@@ -22,7 +22,9 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       .number()
       .int()
       .positive()
-      .describe('FEMA disaster number. Obtain from fema_search_disasters.'),
+      .describe(
+        'FEMA disaster number. Obtain from fema_search_disasters. Numbers above 32767 match no declaration.',
+      ),
     state: z
       .string()
       .length(2)
@@ -147,7 +149,12 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       .describe('Total renter records available before the per-dataset limit.'),
   }),
   enrichment: {
-    notice: z.string().optional().describe('Guidance when no results were found.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Paging guidance when offset is at or past the end of a queried dataset — names its total and last valid offset.',
+      ),
     totalCount: z
       .number()
       .optional()
@@ -164,6 +171,13 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
         'Provide a valid 2-letter US state code such as TX, CA, FL, or PR. Check the full list at FEMA.gov.',
     },
     {
+      reason: 'not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The disaster number is above 32767, the highest number OpenFEMA holds, so no declaration exists.',
+      recovery:
+        'Verify the disaster number using fema_search_disasters. FEMA disaster numbers are typically 4-digit integers.',
+    },
+    {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
       when: 'No IA housing records found for this disaster.',
@@ -177,6 +191,15 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       throw ctx.fail('invalid_state', `"${input.state}" is not a valid US state/territory code.`, {
         ...ctx.recoveryFor('invalid_state'),
       });
+    }
+
+    // OpenFEMA stores disasterNumber as Int16; a larger number names no declaration.
+    if (input.disaster_number > 32767) {
+      throw ctx.fail(
+        'not_found',
+        `No disaster declaration found with number ${input.disaster_number}.`,
+        { disasterNumber: input.disaster_number, ...ctx.recoveryFor('not_found') },
+      );
     }
 
     const svc = getOpenFemaService();
@@ -207,7 +230,13 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     const ownersCount = ownersResult?.count ?? 0;
     const rentersCount = rentersResult?.count ?? 0;
 
-    if (ownersData.length === 0 && rentersData.length === 0) {
+    // A queried dataset with records but none on this page: the offset is past its end.
+    const pastEnd = [
+      { label: 'owner', rows: ownersData.length, total: ownersCount },
+      { label: 'renter', rows: rentersData.length, total: rentersCount },
+    ].filter((d) => d.rows === 0 && d.total > 0);
+
+    if (ownersData.length === 0 && rentersData.length === 0 && pastEnd.length === 0) {
       throw ctx.fail('no_results', `No IA housing records for disaster ${input.disaster_number}.`, {
         disasterNumber: input.disaster_number,
         ...ctx.recoveryFor('no_results'),
@@ -236,6 +265,12 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     });
 
     ctx.enrich.total(ownersCount + rentersCount);
+    if (pastEnd.length > 0) {
+      const ends = pastEnd.map(
+        (d) => `the ${d.total} ${d.label} records (last valid offset ${d.total - 1})`,
+      );
+      ctx.enrich.notice(`Offset ${input.offset} is past the end of ${ends.join(' and ')}.`);
+    }
     ctx.log.info('Housing assistance fetch complete', {
       disasterNumber: input.disaster_number,
       owners: ownersData.length,
@@ -251,7 +286,19 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
   },
 
   format: (result) => {
-    const lines: string[] = [];
+    const lines = [
+      `**Owner records:** ${result.owners.length} of ${result.owners_count}`,
+      `**Renter records:** ${result.renters.length} of ${result.renters_count}`,
+      '',
+    ];
+
+    if (result.owners.length === 0 && result.renters.length === 0) {
+      lines.push(
+        result.owners_count + result.renters_count === 0
+          ? 'No housing assistance records available.'
+          : 'This page is empty: the offset is past the end of the records counted above.',
+      );
+    }
 
     if (result.owners.length > 0) {
       lines.push(`## Owner Assistance (${result.owners.length} of ${result.owners_count} records)`);
@@ -305,12 +352,6 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
           lines.push(`**Other Needs:** $${r.other_needs_amount.toLocaleString()}`);
         lines.push('');
       }
-    }
-
-    if (lines.length === 0) {
-      lines.push('No housing assistance records available.');
-      lines.push(`owners_count: ${result.owners_count}`);
-      lines.push(`renters_count: ${result.renters_count}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

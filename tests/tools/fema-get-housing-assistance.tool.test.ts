@@ -4,8 +4,9 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 import { femaGetHousingAssistance } from '@/mcp-server/tools/definitions/fema-get-housing-assistance.tool.js';
 
 vi.mock('@/services/openfema/openfema-service.js', () => {
@@ -215,5 +216,168 @@ describe('femaGetHousingAssistance', () => {
     expect((text.match(/\*\*Disaster:\*\* #4798/g) ?? []).length).toBe(2);
     expect(text).toContain('Owner Assistance');
     expect(text).toContain('Renter Assistance');
+  });
+});
+
+/** Every text block of a tool result, joined — format() output plus the enrichment trailer. */
+function contentText(result: { content: unknown[] }): string {
+  return (result.content as Array<{ text?: string }>).map((block) => block.text ?? '').join('\n');
+}
+
+type ErrorEnvelope = {
+  code: number;
+  data: { reason?: string; recovery?: { hint: string } };
+};
+
+function errorOf(result: { structuredContent?: unknown }): ErrorEnvelope {
+  return (result.structuredContent as { error: ErrorEnvelope }).error;
+}
+
+describe('femaGetHousingAssistance — filters reaching OpenFEMA', () => {
+  it('passes disaster number 32767, the top of the FEMA range, to both datasets', async () => {
+    const fetchHousingAssistance: Mock = vi.fn().mockResolvedValue({
+      rows: [makeOwnerRow({ disasterNumber: 32767 })],
+      count: 1,
+    });
+    await setMock({ fetchHousingAssistance });
+    const result = await runToolContract(femaGetHousingAssistance, { disaster_number: 32767 });
+    expect(result.isError).not.toBe(true);
+    expect(fetchHousingAssistance.mock.calls.map((call) => call[0])).toEqual([
+      'HousingAssistanceOwners',
+      'HousingAssistanceRenters',
+    ]);
+    for (const call of fetchHousingAssistance.mock.calls) {
+      expect(call[1]).toMatchObject({ filter: 'disasterNumber eq 32767' });
+    }
+  });
+});
+
+describe('femaGetHousingAssistance — empty match', () => {
+  it('returns no_results with its contract code and recovery on both surfaces', async () => {
+    await setMock({
+      fetchHousingAssistance: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+    });
+    const result = await runToolContract(femaGetHousingAssistance, { disaster_number: 9999 });
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data.reason).toBe('no_results');
+    expect(error.data.recovery?.hint).toBe(
+      'No housing assistance records found for disaster 9999. IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.',
+    );
+    expect(contentText(result)).toContain('No IA housing records for disaster 9999.');
+  });
+
+  it('format() renders the no-records line with both counts when both totals are zero', () => {
+    const text = (
+      femaGetHousingAssistance.format!({
+        owners: [],
+        renters: [],
+        owners_count: 0,
+        renters_count: 0,
+      })[0] as { text: string }
+    ).text;
+    expect(text).toContain('No housing assistance records available.');
+    expect(text).toMatch(/owner[^\n]*\b0\b/i);
+    expect(text).toMatch(/renter[^\n]*\b0\b/i);
+  });
+});
+
+describe('femaGetHousingAssistance — disaster numbers above the FEMA range (#23)', () => {
+  const getDisasterNotFound = femaGetDisaster.errors?.find((e) => e.reason === 'not_found');
+
+  it('declares not_found with the same code and recovery as fema_get_disaster', () => {
+    const entry = femaGetHousingAssistance.errors?.find((e) => e.reason === 'not_found');
+    expect(getDisasterNotFound).toBeDefined();
+    expect(entry?.code).toBe(getDisasterNotFound?.code);
+    expect(entry?.recovery).toBe(getDisasterNotFound?.recovery);
+  });
+
+  it.each(['owners', 'renters', 'both'] as const)(
+    'fails 32768 as not_found for type %s without fetching either dataset',
+    async (type) => {
+      const fetchHousingAssistance = vi.fn();
+      await setMock({ fetchHousingAssistance });
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 32768,
+        type,
+        limit: 1,
+      });
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data.reason).toBe('not_found');
+      expect(error.data.recovery?.hint).toBe(getDisasterNotFound?.recovery);
+      expect(contentText(result)).toContain(`Recovery: ${getDisasterNotFound?.recovery}`);
+      expect(fetchHousingAssistance).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('femaGetHousingAssistance — both counts on every response (#25)', () => {
+  /** Serve each dataset its own rows and total. */
+  async function serve(
+    owners: { rows: unknown[]; count: number },
+    renters: { rows: unknown[]; count: number },
+  ) {
+    await setMock({
+      fetchHousingAssistance: vi
+        .fn()
+        .mockImplementation((dataset: string) =>
+          Promise.resolve(dataset === 'HousingAssistanceOwners' ? owners : renters),
+        ),
+    });
+  }
+
+  it('type owners states a renter count of 0', async () => {
+    await serve({ rows: [makeOwnerRow()], count: 1064 }, { rows: [makeRenterRow()], count: 1152 });
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4781,
+      type: 'owners',
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({ owners_count: 1064, renters_count: 0 });
+    const text = contentText(result);
+    expect(text).toMatch(/owner[^\n]*\b1 of 1064\b/i);
+    expect(text).toMatch(/renter[^\n]*\b0 of 0\b/i);
+  });
+
+  it('type renters states an owner count of 0', async () => {
+    await serve({ rows: [makeOwnerRow()], count: 1064 }, { rows: [makeRenterRow()], count: 1152 });
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4781,
+      type: 'renters',
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({ owners_count: 0, renters_count: 1152 });
+    const text = contentText(result);
+    expect(text).toMatch(/owner[^\n]*\b0 of 0\b/i);
+    expect(text).toMatch(/renter[^\n]*\b1 of 1152\b/i);
+  });
+
+  it('type both with the owner page empty still states the owner total', async () => {
+    await serve({ rows: [], count: 1064 }, { rows: [makeRenterRow()], count: 1152 });
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4781,
+      type: 'both',
+      offset: 1100,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ owners_count: 1064, renters_count: 1152 });
+    const text = contentText(result);
+    expect(text).toMatch(/owner[^\n]*\b0 of 1064\b/i);
+    expect(text).toContain('Renter Assistance');
+  });
+
+  it('type both with both pages populated keeps both sections and their counts', async () => {
+    await serve({ rows: [makeOwnerRow()], count: 1064 }, { rows: [makeRenterRow()], count: 1152 });
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4781,
+      limit: 1,
+    });
+    const text = contentText(result);
+    expect(text).toContain('## Owner Assistance (1 of 1064 records)');
+    expect(text).toContain('## Renter Assistance (1 of 1152 records)');
+    expect(result.structuredContent).not.toHaveProperty('notice');
   });
 });

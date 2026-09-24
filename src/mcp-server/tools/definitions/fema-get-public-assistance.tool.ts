@@ -23,7 +23,9 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       .int()
       .positive()
       .optional()
-      .describe('FEMA disaster number to scope results to a single declaration.'),
+      .describe(
+        'FEMA disaster number to scope results to a single declaration. Numbers above 32767 match no declaration.',
+      ),
     state: z
       .string()
       .length(2)
@@ -122,7 +124,12 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     returned_count: z.number().describe('Number of projects in this response.'),
   }),
   enrichment: {
-    notice: z.string().optional().describe('Guidance when no results were found.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Paging guidance when offset is at or past the end of the matching projects — names the total and the last valid offset.',
+      ),
     totalCount: z
       .number()
       .optional()
@@ -146,6 +153,13 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
         'Provide at least one of disaster_number (from fema_search_disasters) or state (2-letter code) to scope the query.',
     },
     {
+      reason: 'not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The disaster number is above 32767, the highest number OpenFEMA holds, so no declaration exists.',
+      recovery:
+        'Verify the disaster number using fema_search_disasters. FEMA disaster numbers are typically 4-digit integers.',
+    },
+    {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
       when: 'No PA project records found for the given filters.',
@@ -165,6 +179,15 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       throw ctx.fail('missing_filter', 'Either disaster_number or state must be provided.', {
         ...ctx.recoveryFor('missing_filter'),
       });
+    }
+
+    // OpenFEMA stores disasterNumber as Int16; a larger number names no declaration.
+    if (input.disaster_number !== undefined && input.disaster_number > 32767) {
+      throw ctx.fail(
+        'not_found',
+        `No disaster declaration found with number ${input.disaster_number}.`,
+        { disasterNumber: input.disaster_number, ...ctx.recoveryFor('not_found') },
+      );
     }
 
     const filterParts: string[] = [];
@@ -189,7 +212,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       ctx,
     );
 
-    if (rows.length === 0) {
+    if (rows.length === 0 && count === 0) {
       throw ctx.fail('no_results', 'No PA project records found.', {
         ...ctx.recoveryFor('no_results'),
         recovery: {
@@ -218,6 +241,11 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     }));
 
     ctx.enrich.total(count);
+    if (projects.length === 0) {
+      ctx.enrich.notice(
+        `Offset ${input.offset} is past the end of the ${count} matching PA projects; the last valid offset is ${count - 1}.`,
+      );
+    }
     ctx.log.info('PA projects fetch complete', { count, returned: projects.length });
     return { projects, total_count: count, returned_count: projects.length };
   },
