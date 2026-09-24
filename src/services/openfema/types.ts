@@ -28,14 +28,29 @@ export interface OpenFemaEnvelope {
   [entityName: string]: unknown;
 }
 
+/**
+ * One entry of an OpenFEMA 400 body. OData criteria errors carry `code` (`OF_OQP_*`)
+ * and `type` (`$filter criteria error`, `$select criteria error`, `$orderby criteria error`);
+ * raw parser errors (`{"name":"Error","message":"Fail at 0"}`) carry neither.
+ */
+export interface OpenFemaErrorDetail {
+  code?: string;
+  message?: string;
+  name?: string;
+  type?: string;
+}
+
 /** OpenFEMA 400 error response shape. */
 export interface OpenFemaErrorResponse {
-  error: Array<{
-    name: string;
-    code: string;
-    type: string;
-    message: string;
-  }>;
+  error: OpenFemaErrorDetail[];
+}
+
+/** A row of the `OpenFemaDataSets` catalog, as selected by `name,version,webService`. */
+export interface OpenFemaCatalogRow {
+  name?: string;
+  version?: number;
+  /** Full endpoint URL; its last path segment is the entity name the API serves. */
+  webService?: string;
 }
 
 /** OData query options for OpenFEMA requests. */
@@ -127,7 +142,7 @@ export interface RawHousingAssistance {
   zipCode?: string;
 }
 
-/** An NFIP claims row. */
+/** A row of `NfipClaims` (v3) — only the fields fema_search_nfip reads. */
 export interface RawNfipClaim {
   amountPaidOnBuildingClaim?: number;
   amountPaidOnContentsClaim?: number;
@@ -136,9 +151,6 @@ export interface RawNfipClaim {
   contentsDamageAmount?: number;
   countyCode?: string;
   dateOfLoss?: string;
-  hash?: string;
-  id?: string;
-  lastRefresh?: string;
   occupancyType?: number;
   ratedFloodZone?: string;
   reportedZipCode?: string;

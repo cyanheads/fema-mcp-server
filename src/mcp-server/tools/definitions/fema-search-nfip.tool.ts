@@ -1,5 +1,6 @@
 /**
- * @fileoverview Tool: fema_search_nfip — NFIP flood insurance claims with DataCanvas spillover.
+ * @fileoverview Tool: fema_search_nfip — NFIP flood insurance claims (OpenFEMA `NfipClaims` v3)
+ * with DataCanvas spillover.
  * @module mcp-server/tools/definitions/fema-search-nfip
  */
 

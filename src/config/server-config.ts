@@ -6,8 +6,21 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
+/**
+ * Strip trailing slashes and a trailing `/v<N>` segment: each dataset carries its own
+ * API version, so the configured URL is the root the version is appended to. An
+ * override written for the old per-version base (`…/api/open/v2`) keeps working.
+ */
+function toApiRoot(url: string): string {
+  return url.replace(/\/+$/, '').replace(/\/v\d+$/, '');
+}
+
 const ServerConfigSchema = z.object({
-  baseUrl: z.string().default('https://www.fema.gov/api/open/v2').describe('OpenFEMA API base URL'),
+  baseUrl: z
+    .url()
+    .default('https://www.fema.gov/api/open')
+    .transform(toApiRoot)
+    .describe('OpenFEMA API root, without a version segment'),
   requestTimeoutMs: z.coerce
     .number()
     .default(30000)
