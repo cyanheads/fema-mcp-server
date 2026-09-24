@@ -56,40 +56,47 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
               .describe('Two-letter state code. Absent when not recorded.'),
             county: z.string().optional().describe('County name. Absent when not recorded.'),
             city: z.string().optional().describe('City name. Absent when not recorded.'),
-            zip_code: z.string().optional().describe('5-digit ZIP code. Absent when not recorded.'),
+            zip_code: z
+              .string()
+              .optional()
+              .describe(
+                '5-digit ZIP code; 00000 when OpenFEMA files the records under no ZIP code. Absent when not recorded.',
+              ),
             valid_registrations: z
               .number()
               .optional()
               .describe(
-                'Number of valid IA registrations from homeowners in this area. Absent when zero or not reported.',
+                'Number of valid IA registrations from homeowners in this area. Absent when not reported.',
               ),
             approved_for_fema_assistance: z
               .number()
               .optional()
               .describe(
-                'Number of homeowner registrations approved for any FEMA assistance. Absent when zero or not reported.',
+                'Number of homeowner registrations approved for any FEMA assistance; 0 when none were. Absent when not reported.',
               ),
             total_approved_ihp_amount: z
               .number()
               .optional()
               .describe(
-                'Total Individuals and Households Program (IHP) assistance approved in USD. Absent when zero or not reported.',
+                'Total Individuals and Households Program (IHP) assistance approved in USD; 0 when none was. Absent when not reported.',
               ),
             repair_replace_amount: z
               .number()
               .optional()
               .describe(
-                'Home repair and replacement assistance in USD. Absent when zero or not reported.',
+                'Home repair and replacement assistance in USD; 0 when none was approved. Absent when not reported.',
               ),
             rental_amount: z
               .number()
               .optional()
-              .describe('Rental assistance granted in USD. Absent when zero or not reported.'),
+              .describe(
+                'Rental assistance granted in USD; 0 when none was. Absent when not reported.',
+              ),
             other_needs_amount: z
               .number()
               .optional()
               .describe(
-                'Other needs assistance (personal property, transportation, etc.) in USD. Absent when zero or not reported.',
+                'Other needs assistance (personal property, transportation, etc.) in USD; 0 when none was approved. Absent when not reported.',
               ),
           })
           .describe('Homeowner housing assistance aggregated by county and ZIP for one disaster.'),
@@ -108,33 +115,42 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
               .describe('Two-letter state code. Absent when not recorded.'),
             county: z.string().optional().describe('County name. Absent when not recorded.'),
             city: z.string().optional().describe('City name. Absent when not recorded.'),
-            zip_code: z.string().optional().describe('5-digit ZIP code. Absent when not recorded.'),
+            zip_code: z
+              .string()
+              .optional()
+              .describe(
+                '5-digit ZIP code; 00000 when OpenFEMA files the records under no ZIP code. Absent when not recorded.',
+              ),
             valid_registrations: z
               .number()
               .optional()
               .describe(
-                'Number of valid IA registrations from renters in this area. Absent when zero or not reported.',
+                'Number of valid IA registrations from renters in this area. Absent when not reported.',
               ),
             approved_for_fema_assistance: z
               .number()
               .optional()
               .describe(
-                'Number of renter registrations approved for any FEMA assistance. Absent when zero or not reported.',
+                'Number of renter registrations approved for any FEMA assistance; 0 when none were. Absent when not reported.',
               ),
             total_approved_ihp_amount: z
               .number()
               .optional()
               .describe(
-                'Total IHP assistance approved for renters in USD. Absent when zero or not reported.',
+                'Total IHP assistance approved for renters in USD; 0 when none was. Absent when not reported.',
               ),
             rental_amount: z
               .number()
               .optional()
-              .describe('Rental assistance granted in USD. Absent when zero or not reported.'),
+              .describe(
+                'Rental assistance granted in USD; 0 when none was. Absent when not reported.',
+              ),
             other_needs_amount: z
               .number()
               .optional()
-              .describe('Other needs assistance in USD. Absent when zero or not reported.'),
+              .describe(
+                'Other needs assistance in USD; 0 when none was approved. Absent when not reported.',
+              ),
           })
           .describe('Renter housing assistance aggregated by county and ZIP for one disaster.'),
       )

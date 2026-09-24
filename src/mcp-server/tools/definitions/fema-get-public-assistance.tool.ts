@@ -82,13 +82,13 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
               .number()
               .optional()
               .describe(
-                'Federal dollars obligated for this project in USD. Absent before obligation.',
+                'Federal dollars obligated for this project in USD; 0 when nothing is obligated.',
               ),
             total_obligated: z
               .number()
               .optional()
               .describe(
-                'Total obligated amount across all funding sources in USD. Absent before obligation.',
+                'Total obligated amount across all funding sources in USD; 0 when nothing is obligated.',
               ),
             county: z
               .string()

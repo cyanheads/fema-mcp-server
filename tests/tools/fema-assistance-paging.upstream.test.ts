@@ -2,10 +2,12 @@
  * @fileoverview fema_get_housing_assistance and fema_get_public_assistance paging against
  * the real OpenFemaService, with `fetch` stubbed by OpenFEMA envelopes shaped like the live
  * API: an empty page past the end still carries `metadata.count`, a genuinely empty match
- * carries `count: 0`. Covers the housing `type` × dataset-state matrix on both surfaces.
+ * carries `count: 0`. Covers the housing `type` × dataset-state matrix on both surfaces, and
+ * the zero counts and amounts OpenFEMA reports in place of absent values.
  * @module tests/tools/fema-assistance-paging.upstream.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -223,4 +225,111 @@ describe('disaster numbers above the FEMA range never reach OpenFEMA', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     },
   );
+});
+
+/** Every output-field description of a tool, keyed by JSON path, from its advertised schema. */
+function fieldDescriptions(schema: z.ZodType): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (node: unknown, path: string) => {
+    if (!node || typeof node !== 'object') return;
+    const n = node as { description?: string; properties?: object; items?: unknown };
+    if (n.description && path) out[path] = n.description;
+    for (const [key, child] of Object.entries(n.properties ?? {})) walk(child, `${path}.${key}`);
+    if (n.items) walk(n.items, `${path}[]`);
+  };
+  walk(z.toJSONSchema(schema, { io: 'output' }), '');
+  return out;
+}
+
+describe('zero amounts, as OpenFEMA reports them, reach both surfaces', () => {
+  /** Live HousingAssistance rows (DR-4332): one registration, nothing approved. */
+  const zeroOwner = {
+    disasterNumber: 4332,
+    state: 'TX',
+    county: 'Aransas (County)',
+    city: 'AUSTIN',
+    zipCode: '78728',
+    validRegistrations: 1,
+    approvedForFemaAssistance: 0,
+    totalApprovedIhpAmount: 0,
+    repairReplaceAmount: 0,
+    rentalAmount: 0,
+    otherNeedsAmount: 0,
+  };
+  const zeroRenter = {
+    disasterNumber: 4332,
+    state: 'TX',
+    county: 'Harris (County)',
+    city: 'NOT APPLICABLE',
+    zipCode: '00000',
+    validRegistrations: 1,
+    approvedForFemaAssistance: 0,
+    totalApprovedIhpAmount: 0,
+    repairReplaceAmount: 0,
+    rentalAmount: 0,
+    otherNeedsAmount: 0,
+  };
+
+  it('fema_get_housing_assistance keeps 0 counts and amounts, and no description calls them absent', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [endpoint(OWNERS, 2), () => envelopeResponse(OWNERS, [zeroOwner], 1)],
+        [endpoint(RENTERS, 2), () => envelopeResponse(RENTERS, [zeroRenter], 1)],
+      ]),
+    );
+    const result = await runToolContract(femaGetHousingAssistance, { disaster_number: 4332 });
+    expect(result.isError).not.toBe(true);
+    const zeros = {
+      approved_for_fema_assistance: 0,
+      total_approved_ihp_amount: 0,
+      rental_amount: 0,
+      other_needs_amount: 0,
+    };
+    expect(result.structuredContent).toMatchObject({
+      owners: [{ ...zeros, repair_replace_amount: 0, valid_registrations: 1 }],
+      renters: [{ ...zeros, valid_registrations: 1, zip_code: '00000' }],
+    });
+    const text = contentText(result);
+    expect(text).toContain('**Approved for FEMA Assistance:** 0');
+    expect(text).toContain('**Total Approved IHP:** $0');
+    expect(text).toContain('**Repair/Replacement:** $0');
+
+    const described = fieldDescriptions(femaGetHousingAssistance.output);
+    for (const [path, text] of Object.entries(described)) {
+      expect(text, path).not.toMatch(/absent when zero/i);
+    }
+    expect(described['.renters[].zip_code']).toContain('00000');
+  });
+
+  it('fema_get_public_assistance keeps 0 obligations, and their descriptions say 0, not absent', async () => {
+    /** Live PublicAssistanceFundedProjectsDetails row (DR-4856): eligible, nothing obligated. */
+    const row = {
+      disasterNumber: 4856,
+      pwNumber: 266,
+      projectAmount: 24644,
+      federalShareObligated: 0,
+      totalObligated: 0,
+      firstObligationDate: '2025-07-08T00:00:00.000Z',
+      projectStatus: 'Eligible',
+      projectSize: 'Small',
+    };
+    fetchMock.mockImplementation(
+      routeFetch([[endpoint(PA, 2), () => envelopeResponse(PA, [row], 1)]]),
+    );
+    const result = await runToolContract(femaGetPublicAssistance, { disaster_number: 4856 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      projects: [{ federal_share_obligated: 0, total_obligated: 0, project_amount: 24644 }],
+    });
+    const text = contentText(result);
+    expect(text).toContain('**Total Obligated:** $0');
+    expect(text).toContain('**Federal Share Obligated:** $0');
+
+    const described = fieldDescriptions(femaGetPublicAssistance.output);
+    for (const field of ['federal_share_obligated', 'total_obligated']) {
+      const description = described[`.projects[].${field}`];
+      expect(description, field).not.toMatch(/absent/i);
+      expect(description, field).toMatch(/\b0\b/);
+    }
+  });
 });
