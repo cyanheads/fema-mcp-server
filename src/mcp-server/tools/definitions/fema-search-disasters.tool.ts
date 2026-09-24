@@ -8,6 +8,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
 import { US_STATES } from '@/services/openfema/us-states.js';
 
+const CALENDAR_DATE_ERROR =
+  'Expected a calendar date in YYYY-MM-DD form (e.g., 2024-01-31) — no time, partial date, or day past the end of the month.';
+
 export const femaSearchDisasters = tool('fema_search_disasters', {
   title: 'Search FEMA Disaster Declarations',
   description:
@@ -38,15 +41,23 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
         'Declaration type: DR (major disaster declaration), EM (emergency declaration), FM (fire management assistance declaration).',
       ),
     date_from: z
-      .string()
+      .union([
+        z.literal(''),
+        z.iso.date({ error: CALENDAR_DATE_ERROR }).describe('Calendar date, YYYY-MM-DD.'),
+      ])
       .optional()
       .describe(
-        'Start of declaration date range in ISO 8601 format (e.g., 2024-01-01). Inclusive.',
+        'Start of the declaration date range as a calendar date in YYYY-MM-DD format (e.g., 2024-01-01). Inclusive.',
       ),
     date_to: z
-      .string()
+      .union([
+        z.literal(''),
+        z.iso.date({ error: CALENDAR_DATE_ERROR }).describe('Calendar date, YYYY-MM-DD.'),
+      ])
       .optional()
-      .describe('End of declaration date range in ISO 8601 format (e.g., 2024-12-31). Inclusive.'),
+      .describe(
+        'End of the declaration date range as a calendar date in YYYY-MM-DD format (e.g., 2024-12-31). Inclusive.',
+      ),
     county: z
       .string()
       .optional()
@@ -140,7 +151,12 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       .describe('Number of unique deduplicated declarations in this response.'),
   }),
   enrichment: {
-    notice: z.string().optional().describe('Guidance when no results were found.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Paging guidance when offset is at or past the end of the matching declarations — names the total and the last valid offset.',
+      ),
     totalCount: z
       .number()
       .optional()
@@ -178,12 +194,8 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       filterParts.push(`substringof('${escapeODataString(input.incident_type)}', incidentType)`);
     }
     if (input.declaration_type) filterParts.push(`declarationType eq '${input.declaration_type}'`);
-    if (input.date_from) {
-      filterParts.push(`declarationDate ge '${escapeODataString(input.date_from)}T00:00:00.000Z'`);
-    }
-    if (input.date_to) {
-      filterParts.push(`declarationDate le '${escapeODataString(input.date_to)}T23:59:59.999Z'`);
-    }
+    if (input.date_from) filterParts.push(`declarationDate ge '${input.date_from}T00:00:00.000Z'`);
+    if (input.date_to) filterParts.push(`declarationDate le '${input.date_to}T23:59:59.999Z'`);
     if (input.county?.trim()) {
       filterParts.push(`substringof('${escapeODataString(input.county)}', designatedArea)`);
     }
@@ -263,7 +275,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       input.offset + input.limit,
     );
 
-    if (declarations.length === 0) {
+    if (disasterMap.size === 0) {
       throw ctx.fail('no_results', 'No disaster declarations matched the query.', {
         ...ctx.recoveryFor('no_results'),
         recovery: {
@@ -273,6 +285,14 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     }
 
     ctx.enrich.total(disasterMap.size);
+    if (declarations.length === 0) {
+      const last = `the last valid offset is ${disasterMap.size - 1}`;
+      ctx.enrich.notice(
+        count > rows.length
+          ? `Offset ${input.offset} is past the end of the ${disasterMap.size} declarations within the most recent 10,000 of ${count} matching designated-area rows; ${last}. Narrow the filters to reach older declarations.`
+          : `Offset ${input.offset} is past the end of the ${disasterMap.size} matching declarations; ${last}.`,
+      );
+    }
     ctx.log.info('Disaster search complete', { count, returned: declarations.length });
     return {
       declarations,

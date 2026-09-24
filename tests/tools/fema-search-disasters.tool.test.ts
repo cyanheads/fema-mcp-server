@@ -3,8 +3,10 @@
  * @module tests/tools/fema-search-disasters.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaSearchDisasters } from '@/mcp-server/tools/definitions/fema-search-disasters.tool.js';
 
 // Mock the service module — handler calls getOpenFemaService() at runtime
@@ -39,6 +41,31 @@ function makeDisasterRow(overrides: Record<string, unknown> = {}) {
 async function setMock(impl: Record<string, unknown>) {
   const mod = await import('@/services/openfema/openfema-service.js');
   (mod as unknown as { __setMock: (s: Record<string, unknown>) => void }).__setMock(impl);
+}
+
+/** Every text block of a tool result, joined — format() output plus the enrichment trailer. */
+function contentText(result: { content: unknown[] }): string {
+  return (result.content as Array<{ text?: string }>).map((block) => block.text ?? '').join('\n');
+}
+
+type ErrorEnvelope = {
+  code: number;
+  data: { reason?: string; recovery?: { hint: string } };
+};
+
+function errorOf(result: { structuredContent?: unknown }): ErrorEnvelope {
+  return (result.structuredContent as { error: ErrorEnvelope }).error;
+}
+
+/** The distinct-disaster rows used by the paging tests: 3 declarations over 5 area rows. */
+function threeDeclarationRows() {
+  return [
+    makeDisasterRow({ disasterNumber: 4780 }),
+    makeDisasterRow({ disasterNumber: 4780 }),
+    makeDisasterRow({ disasterNumber: 4780 }),
+    makeDisasterRow({ disasterNumber: 4781 }),
+    makeDisasterRow({ disasterNumber: 4782 }),
+  ];
 }
 
 describe('femaSearchDisasters', () => {
@@ -352,5 +379,165 @@ describe('femaSearchDisasters', () => {
     expect(text).not.toContain('DR-3600');
     expect(text).not.toContain('DR-9999');
     expect(text).not.toContain('-9999');
+  });
+});
+
+describe('femaSearchDisasters — date filters', () => {
+  let fetchDisasters: Mock;
+
+  beforeEach(async () => {
+    fetchDisasters = vi.fn().mockResolvedValue({ rows: [makeDisasterRow()], count: 1 });
+    await setMock({ fetchDisasters });
+  });
+
+  it('turns YYYY-MM-DD dates into an inclusive declarationDate range filter', async () => {
+    const result = await runToolContract(femaSearchDisasters, {
+      date_from: '2024-01-01',
+      date_to: '2024-12-31',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(fetchDisasters).toHaveBeenCalledTimes(1);
+    expect(fetchDisasters.mock.calls[0]?.[0]).toMatchObject({
+      filter:
+        "declarationDate ge '2024-01-01T00:00:00.000Z' and declarationDate le '2024-12-31T23:59:59.999Z'",
+    });
+  });
+
+  it('treats an empty date string as absent, as form-based clients send it', async () => {
+    const result = await runToolContract(femaSearchDisasters, { date_from: '', date_to: '' });
+    expect(result.isError).not.toBe(true);
+    expect(fetchDisasters.mock.calls[0]?.[0]).not.toHaveProperty('filter');
+  });
+});
+
+describe('femaSearchDisasters — empty match', () => {
+  it('returns no_results with its contract code and recovery on both surfaces', async () => {
+    await setMock({ fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }) });
+    const result = await runToolContract(femaSearchDisasters, { state: 'WY' });
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data.reason).toBe('no_results');
+    expect(error.data.recovery?.hint).toBe(
+      'No disaster declarations matched the search criteria. Broaden the search by removing filters, expanding the date range, or trying a different state or incident type.',
+    );
+    expect(contentText(result)).toContain('No disaster declarations matched');
+  });
+});
+
+describe('femaSearchDisasters — date format (#31)', () => {
+  let fetchDisasters: Mock;
+
+  beforeEach(async () => {
+    fetchDisasters = vi.fn().mockResolvedValue({ rows: [makeDisasterRow()], count: 1 });
+    await setMock({ fetchDisasters });
+  });
+
+  /**
+   * Values OpenFEMA answers with HTTP 400 (`yesterday`, `2024-13-45`, `2024-1-5`, timestamps),
+   * plus values it silently reinterprets: `2024` and `2024-01` as `2024-01-01`, and
+   * `2024-02-30` rolled over to `2024-03-01`.
+   */
+  const rejected = [
+    'yesterday',
+    '2024-13-45',
+    '2024-1-5',
+    '2024-01-01T00:00:00Z',
+    '2024/01/01',
+    '2024',
+    '2024-01',
+    '2024-02-30',
+    '2023-02-29',
+  ];
+
+  for (const field of ['date_from', 'date_to'] as const) {
+    it.each(rejected)(
+      `rejects ${field} %j as invalid_arguments before any request`,
+      async (value) => {
+        const result = await runToolContract(femaSearchDisasters, { [field]: value });
+        expect(result.isError).toBe(true);
+        const error = errorOf(result);
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.data.reason).toBe('invalid_arguments');
+        expect(error.data.recovery?.hint).toContain('YYYY-MM-DD');
+        expect(contentText(result)).toContain(field);
+        expect(contentText(result)).toContain('YYYY-MM-DD');
+        expect(fetchDisasters).not.toHaveBeenCalled();
+      },
+    );
+  }
+
+  it('accepts a leap day', async () => {
+    const result = await runToolContract(femaSearchDisasters, { date_from: '2024-02-29' });
+    expect(result.isError).not.toBe(true);
+    expect(fetchDisasters.mock.calls[0]?.[0]).toMatchObject({
+      filter: "declarationDate ge '2024-02-29T00:00:00.000Z'",
+    });
+  });
+
+  it('advertises the YYYY-MM-DD format as a pattern in the input JSON Schema', () => {
+    const schema = z.toJSONSchema(femaSearchDisasters.input, { io: 'input' }) as {
+      properties: Record<string, { anyOf?: Array<Record<string, unknown>>; description?: string }>;
+    };
+    for (const field of ['date_from', 'date_to']) {
+      const prop = schema.properties[field];
+      const dateBranch = prop?.anyOf?.find((branch) => branch.format === 'date');
+      expect(dateBranch?.pattern).toEqual(expect.any(String));
+      expect(new RegExp(dateBranch?.pattern as string).test('2024-01-31')).toBe(true);
+      expect(new RegExp(dateBranch?.pattern as string).test('2024-01')).toBe(false);
+      expect(prop?.description).toContain('YYYY-MM-DD');
+    }
+  });
+});
+
+describe('femaSearchDisasters — offset past the end (#32)', () => {
+  it('returns an empty page with the totals and a notice naming the last valid offset', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: threeDeclarationRows(), count: 5 }),
+    });
+    const result = await runToolContract(femaSearchDisasters, { offset: 3 });
+    expect(result.isError).not.toBe(true);
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured).toMatchObject({
+      declarations: [],
+      total_declarations: 3,
+      total_area_rows: 5,
+      returned_count: 0,
+      totalCount: 3,
+    });
+    const notice = structured.notice as string;
+    expect(notice).toContain('Offset 3');
+    expect(notice).toContain('3 matching declarations');
+    expect(notice).toContain('last valid offset is 2');
+    const text = contentText(result);
+    expect(text).toContain('0 of 3 unique declaration(s)');
+    expect(text).toContain(notice);
+    expect(text).not.toMatch(/\bno\b[^.\n]*\b(records|declarations)\b/i);
+  });
+
+  it('keeps paging the last valid offset as a normal page', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: threeDeclarationRows(), count: 5 }),
+    });
+    const result = await runToolContract(femaSearchDisasters, { offset: 2 });
+    expect(result.isError).not.toBe(true);
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured).toMatchObject({ returned_count: 1, total_declarations: 3 });
+    expect(structured).not.toHaveProperty('notice');
+  });
+
+  it('says the total is a floor when the 10,000-row overfetch cap was hit', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: threeDeclarationRows(), count: 25_000 }),
+    });
+    const result = await runToolContract(femaSearchDisasters, { offset: 50 });
+    expect(result.isError).not.toBe(true);
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('last valid offset is 2');
+    expect(notice).toContain('10,000');
+    expect(notice).toMatch(/narrow/i);
+    // More than 3 declarations match; only 3 are reachable inside the capped window.
+    expect(notice).not.toContain('3 matching declarations');
+    expect(contentText(result)).toContain(notice);
   });
 });
