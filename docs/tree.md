@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-09-19 19:14:34
+Generated on: 2026-09-24 05:55:26
 
 ```text
 fema-mcp-server/
@@ -26,6 +26,7 @@ fema-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -162,6 +163,10 @@ fema-mcp-server/
 │   │       └── us-states.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
+│   ├── helpers/
+│   │   └── openfema-fixtures.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── fema-disaster.resource.test.ts
@@ -170,6 +175,7 @@ fema-mcp-server/
 │   └── tools/
 │       ├── canvas-engine-contract.test.ts
 │       ├── canvas-input-contract.test.ts
+│       ├── fema-assistance-paging.upstream.test.ts
 │       ├── fema-dataframe-describe.tool.test.ts
 │       ├── fema-dataframe-drop.tool.test.ts
 │       ├── fema-dataframe-query.tool.test.ts
@@ -178,7 +184,8 @@ fema-mcp-server/
 │       ├── fema-get-public-assistance.tool.test.ts
 │       ├── fema-query-dataset.tool.test.ts
 │       ├── fema-search-disasters.tool.test.ts
-│       └── fema-search-nfip.tool.test.ts
+│       ├── fema-search-nfip.tool.test.ts
+│       └── fema-search-nfip.upstream.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

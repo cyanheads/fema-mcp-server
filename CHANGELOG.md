@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-23 · ⚠️ Breaking
+
+Datasets resolve their OpenFEMA API version from the dataset catalog, OpenFEMA 400 errors name the failing clause and field, and paging past the end returns a notice instead of no_results; fema_search_disasters date_from/date_to now accept only YYYY-MM-DD dates.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-19 · ⚠️ Breaking · 🛡️ Security
 
 Canvas IDs are validated when supplied, OpenFEMA calls use one bounded exchange budget without exposing request URLs, sessions default to stateless with explicit overrides, and project tooling adopts the current framework conventions.
