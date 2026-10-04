@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-03
+
+Framework adoption brings clearer errors and telemetry controls, with corrected registry launch commands and portable production dependency installs.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-09-24
 
 fema_search_nfip pages claims by offset within a 100,000-character inline budget and acquires a canvas only to stage an overflowing match; fema_search_disasters returns only complete declarations past its 10,000-row window, with a date_to continuation.
