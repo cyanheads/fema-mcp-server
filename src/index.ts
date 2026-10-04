@@ -5,6 +5,7 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { getServerConfig } from './config/server-config.js';
 import { femaDisasterResource } from './mcp-server/resources/definitions/fema-disaster.resource.js';
 import { femaDataframeDescribe } from './mcp-server/tools/definitions/fema-dataframe-describe.tool.js';
 import { femaDataframeDrop } from './mcp-server/tools/definitions/fema-dataframe-drop.tool.js';
@@ -36,6 +37,7 @@ await createApp({
   resources: [femaDisasterResource],
   prompts: [],
   setup(core) {
+    getServerConfig();
     initOpenFemaService(core.config, core.storage);
     setCanvas(core.canvas);
   },

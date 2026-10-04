@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { internalError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
 import { US_STATES } from '@/services/openfema/us-states.js';
 
@@ -242,7 +242,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     if (count > OVERFETCH_CAP) {
       cutDay = rows.at(-1)?.declarationDate?.slice(0, 10);
       if (!cutDay) {
-        throw new Error('OpenFEMA returned a declaration row without a declarationDate.');
+        throw internalError('OpenFEMA returned a declaration row without a declarationDate.');
       }
     }
     const windowRows = cutDay

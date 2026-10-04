@@ -491,6 +491,26 @@ describe('femaSearchDisasters — date format (#31)', () => {
 });
 
 describe('femaSearchDisasters — offset past the end (#32)', () => {
+  it('reports a missing declaration date at the read cap as InternalError on both surfaces', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [makeDisasterRow({ declarationDate: undefined })],
+        count: 10_001,
+      }),
+    });
+    const result = await runToolContract(femaSearchDisasters, {});
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      error: {
+        code: JsonRpcErrorCode.InternalError,
+        message: 'OpenFEMA returned a declaration row without a declarationDate.',
+      },
+    });
+    expect(contentText(result)).toContain(
+      'OpenFEMA returned a declaration row without a declarationDate.',
+    );
+  });
+
   it('returns an empty page with the totals and a notice naming the last valid offset', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({ rows: threeDeclarationRows(), count: 5 }),
