@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fema-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fema-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fema-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fema-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fema-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fema-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -45,7 +45,7 @@ Federal disaster recovery data from FEMA's OpenFEMA API — disaster declaration
 | `fema_dataframe_drop` | Remove a staged DataCanvas table or view — opt-in, absent from `tools/list` by default |
 | `fema_query_dataset` | Generic OData query against any dataset in the OpenFEMA catalog — escape hatch for datasets the convenience tools don't cover |
 
-`fema_dataframe_drop` is registered only when `FEMA_ENABLE_CANVAS_DROP=true`; the other eight tools are always advertised.
+`fema_dataframe_drop` is callable and appears in `tools/list` only when `FEMA_ENABLE_CANVAS_DROP=true`. Its definition is always included in `createApp()`; while disabled, the HTTP landing page displays the enable hint. The other eight tools are always advertised.
 
 ### Resources
 
@@ -53,101 +53,82 @@ Federal disaster recovery data from FEMA's OpenFEMA API — disaster declaration
 |:---|:---|
 | `fema://disaster/{disasterNumber}` | Summary for a specific FEMA disaster declaration — title, state, incident type, programs, incident period |
 
-All resource data is also reachable via tools. Use `fema_get_disaster` for the same data with pagination and full designated-area detail.
+All resource data is also reachable via tools. Use `fema_get_disaster` for the same data with full designated-area detail.
 
 ## Capability reference
 
 ### `fema_search_disasters` <sub>tool</sub>
 
-- Filters: `state` (2-letter code), `incident_type` (substring match), `declaration_type` (`DR`/`EM`/`FM`), `date_from`/`date_to` (inclusive declaration date range, calendar dates in `YYYY-MM-DD` form — anything else is rejected before a request is made), `county` (substring); paginated via `limit` (1–1000, default 50) / `offset`
-- Returns deduplicated declaration-level summaries — one row per unique disaster number, with `designated_area_count` and program flags (`ia_declared`/`pa_declared`/`hm_declared`)
-- Deduplicates the most recent 10,000 designated-area rows before paging. When `total_area_rows` exceeds 10,000, it drops the declarations dated on the oldest day in that window, so every returned declaration is complete; the response sets `truncated: true`, words its declaration totals as lower bounds, and its `notice` names the `date_to` (`YYYY-MM-DD`) that continues with older declarations
-- An `offset` at or past the last matching declaration returns an empty page with the totals and a `notice` naming the last valid offset (plus the `date_to` continuation when truncated)
-- Typed errors: `invalid_state`, `no_results` (nothing matches the filters)
+- Filters: `state`, `incident_type`, `declaration_type` (`DR`/`EM`/`FM`), inclusive `date_from`/`date_to` (`YYYY-MM-DD`), and `county`; page with `limit` (1–1000, default 50) and `offset`.
+- Returns one summary per disaster number with `designated_area_count`, program flags, and declaration totals. Typed errors: `invalid_state`, `no_results`.
+- Searches the most recent 10,000 designated-area rows. When capped, returns complete declarations, marks `truncated`, reports declaration totals as lower bounds, and names the next `date_to` in `notice`.
 
 ---
 
 ### `fema_get_disaster` <sub>tool</sub>
 
-- Input: `disaster_number` (positive integer), obtained from `fema_search_disasters`
-- Returns every designated county/municipality row for the declaration, with FIPS codes, incident period, and program flags OR'd across all areas
-- Disaster numbers above 32767 (OpenFEMA's Int16 field limit) return `not_found` rather than a raw API type-mismatch error
+- Requires `disaster_number` from `fema_search_disasters`.
+- Returns all designated-area records, FIPS codes, incident period, and program flags combined across areas; a missing disaster returns `not_found`.
 
 ---
 
 ### `fema_get_public_assistance` <sub>tool</sub>
 
-- Requires `disaster_number` or `state` — at least one; optional `county` substring filter; paginated via `limit` (1–1000, default 100) / `offset`
-- Returns applicant, damage category, project size/status, federal share obligated, and total obligated per project
-- An `offset` at or past the last matching project returns an empty page with the total and a `notice` naming the last valid offset
-- Typed errors: `invalid_state`, `missing_filter` (neither `disaster_number` nor `state` given), `not_found` (disaster number above 32767, OpenFEMA's Int16 field limit — rejected before any request, same as `fema_get_disaster`), `no_results` (nothing matches the filters)
+- Requires `disaster_number` or `state`; optional `county` filter, `limit` (1–1000, default 100), and `offset`.
+- Returns applicants, damage categories, project size/status, and federal and total obligations. Typed errors: `invalid_state`, `missing_filter`, `not_found`, `no_results`.
 
 ---
 
 ### `fema_get_housing_assistance` <sub>tool</sub>
 
-- Input: `disaster_number` (required), optional `state` filter, `type` (`owners`/`renters`/`both`, default `both`); paginated via `limit` (1–1000, default 100) / `offset`
-- Returns separate `owners` and `renters` arrays — registrations, approved amounts, and repair/rental/other-needs breakdowns by county and ZIP — plus `owners_count`/`renters_count` totals, both stated on every response
-- An `offset` at or past the end of a queried dataset returns that dataset's empty page with its total and a `notice` naming its last valid offset
-- Typed errors: `invalid_state`, `not_found` (disaster number above 32767, OpenFEMA's Int16 field limit — rejected before any request, same as `fema_get_disaster`), `no_results` (no records for the disaster — IA housing data can take weeks to appear after a declaration)
+- Requires `disaster_number`; optional `state`, `type` (`owners`/`renters`/`both`, default `both`), `limit` (1–1000, default 100), and `offset`.
+- Returns separate `owners` and `renters` arrays with county/ZIP registrations and approved amounts, plus `owners_count`/`renters_count` totals. Typed errors: `invalid_state`, `not_found`, `no_results`.
 
 ---
 
 ### `fema_search_nfip` <sub>tool</sub>
 
-- Reads OpenFEMA's `NfipClaims` v3 dataset (NFIP redacted claims)
-- `state` is required — the unfiltered NFIP Claims dataset is 2.7M rows; optional `county_code` (5-digit FIPS or a bare 3-digit code, auto-prefixed with the state FIPS), `zip_code`, `year_from`/`year_to`; paginated via `limit` (1–10000, default 1000) / `offset`
-- Claims come newest date of loss first, with claim ID breaking ties, so offset pages never repeat or skip a claim. An inline page also stops at 100,000 characters of claims (about 330 claims); whenever claims are left out, a `notice` names the offset to continue from
-- `cause_of_damage` and `occupancy_type` carry OpenFEMA's published codes unchanged; the output schema lists what each code means
-- When `CANVAS_PROVIDER_TYPE=duckdb` is set and the match exceeds the inline budget, a call at `offset` 0 stages the whole match (up to 50,000 rows) on a DataCanvas table. The response carries `canvas_id`, `canvas_table`, and `staged_count`, and its `notice` points to `fema_dataframe_describe`, then `fema_dataframe_query`; rows past the inline claims are read from that table. `truncated: true` marks a partial stage at the cap, where `total_count` still reports the full match. A match that fits inline never creates a canvas, and a call at a later `offset` returns its inline page without staging
-- An `offset` at or past the last matching claim returns an empty page with the total and a `notice` naming the last valid offset
-- Typed errors: `invalid_state`, `no_results`
+- Requires `state`; optional `county_code`, `zip_code`, `year_from`/`year_to`, `limit` (1–10000, default 1000), and `offset`. Reads `NfipClaims` v3, newest loss first with claim ID breaking ties.
+- `county_code` accepts a full 5-digit FIPS code (e.g., `48201`) or a 3-digit county code (e.g., `201`); the server prefixes the latter with the state's FIPS code.
+- Inline claims stop at 100,000 characters, with a continuation offset in `notice`; `cause_of_damage` and `occupancy_type` retain OpenFEMA's published codes. Typed errors: `invalid_state`, `no_results`.
+- With `CANVAS_PROVIDER_TYPE=duckdb`, a first-page match exceeding the inline budget stages up to 50,000 rows. `canvas_id`, `canvas_table`, and `staged_count` identify the stage; `truncated: true` marks its cap and `total_count` retains the full match. Inspect the stage with `fema_dataframe_describe`, then query it with `fema_dataframe_query`.
 
 ---
 
 ### `fema_dataframe_describe` <sub>tool</sub>
 
-All four canvas inputs (`fema_search_nfip`, `fema_dataframe_describe`, `fema_dataframe_query`, and `fema_dataframe_drop`) require a server-issued 10-character URL-safe ID matching `[A-Za-z0-9_-]{10}` when supplied. Omit it on the first NFIP search.
-
-- Input: `canvas_id` from a `fema_search_nfip` response
-- Lists table/view names, DuckDB column types, and nullability; row count reflects what was actually staged, not the inline preview
-- Typed errors: `canvas_not_found`, `canvas_unavailable` (DataCanvas not enabled on this deployment)
+- Requires `canvas_id` from `fema_search_nfip`.
+- Lists table/view names, column types, nullability, and staged row counts. Typed errors: `canvas_not_found`, `canvas_unavailable`.
 
 ---
 
 ### `fema_dataframe_query` <sub>tool</sub>
 
-- Input: `canvas_id` plus a single SQL `query`; only SELECT statements are permitted — DDL, DML, COPY, and file-reading functions are blocked
-- Results are capped at the canvas row limit; a capped response sets `truncated`/`shown`/`cap` enrichment fields with LIMIT/OFFSET paging guidance
-- Typed errors: `canvas_not_found`, `canvas_unavailable`, `invalid_query`, `sql_execution_error` (use `TRY_CAST` or filter incompatible values)
+- Requires `canvas_id` and a single SQL `query`; only SELECT statements are permitted. DDL, DML, COPY, and file-reading functions are blocked.
+- Returns rows capped at the canvas row limit, with `truncated`/`shown`/`cap` and LIMIT/OFFSET guidance when capped. Typed errors: `canvas_not_found`, `canvas_unavailable`, `invalid_query`, `sql_execution_error` (use `TRY_CAST` or filter incompatible values).
 
 ---
 
 ### `fema_dataframe_drop` <sub>tool</sub>
 
-- Opt-in: not registered (absent from `tools/list`) unless `FEMA_ENABLE_CANVAS_DROP=true`
-- Input: `canvas_id` and the exact `table_name` from `fema_dataframe_describe`
-- Removes one staged table or view only — never changes FEMA source data; `dropped: false` when the name doesn't exist
-- Typed errors: `canvas_not_found`, `canvas_unavailable`
+- Requires `canvas_id` and the exact `table_name` from `fema_dataframe_describe`.
+- Removes one staged table or view; `dropped: false` means the name did not exist. Typed errors: `canvas_not_found`, `canvas_unavailable`.
+- Opt-in through `FEMA_ENABLE_CANVAS_DROP=true`; disabled by default with an enable hint in the manifest. FEMA source data is unchanged.
 
 ---
 
 ### `fema_query_dataset` <sub>tool</sub>
 
-- Input: `dataset` (case-sensitive OpenFEMA entity name), optional raw OData `filter`/`select`/`orderby`, `limit` (1–10000, default 100) / `offset`
-- Each dataset is queried at the API version the [OpenFEMA dataset catalog](https://www.fema.gov/about/openfema/data-sets) lists for it (v1–v4, highest listed version wins); the catalog is cached in-process for 6 hours
-- Escape hatch for datasets the convenience tools don't cover (e.g. `NfipPolicies`, `IndividualAssistanceHousingRegistrantsLargeDisasters`, `FemaWebDeclarationAreas`); for `NfipPolicies` use `propertyState` (not `state`) and `reportedZipCode` — it has no `countyCode` — and always include a ZIP filter to avoid timeout
-- An empty page is a success with a `notice`: filter guidance when nothing matches (`total_count` 0), or the total and the last valid offset when `offset` is at or past the end of the matches
-- A dataset resolves by its `webService` path segment or its catalog `name` (`OpenFemaDataSetFields` or `DataSetFields`; `DataSets` or `OpenFemaDataSets` for the catalog itself)
-- Typed errors: `unknown_dataset` (name not in the catalog), `dataset_not_served` (listed in the catalog, but OpenFEMA serves no API endpoint for it), `catalog_unavailable` (catalog unreadable, retryable), `invalid_filter` / `invalid_select` / `invalid_orderby` (OpenFEMA rejected that parameter — the message names the field whenever OpenFEMA does), `invalid_odata_syntax` (unparseable, parameter not identified)
+- Requires a case-sensitive OpenFEMA `dataset`; optional OData `filter`/`select`/`orderby`, `limit` (1–10000, default 100), and `offset`. Resolves each dataset's API version from the catalog.
+- Returns records and `total_count`; an empty page succeeds with filter or paging guidance. Typed errors: `unknown_dataset`, `dataset_not_served`, `catalog_unavailable` (retryable), `invalid_filter`, `invalid_select`, `invalid_orderby`, `invalid_odata_syntax`.
+- For `NfipPolicies`, use `propertyState` and `reportedZipCode`; always include a ZIP filter to avoid timeout.
 
 ---
 
 ### `fema://disaster/{disasterNumber}` <sub>resource</sub>
 
-- Params: `disasterNumber` as a string of digits
-- Returns title, state, incident type, declaration type/date, incident period, `programs_declared` array, and `designated_area_count`
-- Typed error: `not_found` for a malformed number (anything but digits), a number outside 1–32767 (neither reaches OpenFEMA), or a number with no declaration — with a recovery hint pointing to `fema_search_disasters`
+- Requires `disasterNumber` as a string of digits.
+- Returns title, state, incident type, declaration type/date, incident period, `programs_declared`, and `designated_area_count`; `not_found` carries recovery guidance pointing to `fema_search_disasters`.
 
 ## Features
 
@@ -155,6 +136,8 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 OpenFEMA-specific:
 
+- Disaster numbers are in OpenFEMA's range 1–32767; an offset past the last match returns an empty page with totals and a notice naming the last valid offset.
+- Canvas inputs accept the server-issued 10-character URL-safe `canvas_id` (`[A-Za-z0-9_-]{10}`); omit it on the first NFIP search.
 - Typed OpenFEMA REST client with `%24`-prefixed OData parameter encoding (an Akamai requirement), per-dataset API versions resolved from the OpenFEMA dataset catalog, and structured error classification distinguishing JSON 400 responses (by the failing `filter`/`select`/`orderby` clause) from HTML Drupal error pages
 - Automatic deduplication of `DisasterDeclarationsSummaries` — one row per designated area collapsed to declaration-level summaries with `designated_area_count`
 - NFIP Claims guard: `state` filter is required to prevent unbounded 2.7M-row fetches
@@ -313,6 +296,12 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log failed-call arguments and results, redacted by key name. Secrets in free-form values are retained. | `false` |
+| `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` | Per-payload UTF-8 byte cap for failed-call logging. | `16384` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base URL; traces append `/v1/traces`, metrics append `/v1/metrics`. | — |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override the traces endpoint; used as-is. | — |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Override the metrics endpoint; used as-is. | — |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Opt into log export at this URL; the base endpoint alone never enables it. | — |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
@@ -349,7 +338,7 @@ docker build -t fema-mcp-server .
 docker run --rm -e MCP_TRANSPORT_TYPE=stdio fema-mcp-server
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/fema-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. Production dependencies, including the DuckDB native binding, are installed directly in the runtime stage without lifecycle scripts.
+The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/fema-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them. Production dependencies are cross-installed for the target architecture in a native build stage, with release-age and Socket checks; the Debian runtime excludes unused musl bindings.
 
 ## Project structure
 

@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-09-24 07:24:11
+Generated on: 2026-10-04 05:56:55
 
 ```text
 fema-mcp-server/
@@ -129,9 +129,11 @@ fema-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
