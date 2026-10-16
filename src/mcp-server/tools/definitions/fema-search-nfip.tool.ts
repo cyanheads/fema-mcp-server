@@ -22,9 +22,10 @@ const PREVIEW_CHARS = 100_000;
 /** Cap on rows registered to canvas. */
 const MAX_CANVAS_ROWS = 50_000;
 /**
- * Rows per canvas page. OpenFEMA permits $top up to 10,000; 5,000 keeps the drain of a dense
- * ~50,000-row county-year to ~10 fetches, well inside transport timeouts, and fewer, larger
- * fetches are gentler on the FEMA API than many small ones.
+ * Rows per canvas page. OpenFEMA serves larger pages (`NfipClaims` answered `$top=50000` on
+ * 2026-10-16); 5,000 keeps the drain of a dense ~50,000-row county-year to ~10 fetches, each
+ * well inside transport timeouts, and fewer, larger fetches are gentler on the FEMA API than
+ * many small ones.
  */
 const PAGE_SIZE = 5000;
 /** The 12 fields the tool reads — everything a response or canvas table carries. */
@@ -96,6 +97,25 @@ const STATE_FIPS: Record<string, string> = {
   PR: '72',
   VI: '78',
 };
+
+/** State FIPS code → abbreviation, to name the state a 5-digit county code belongs to. */
+const STATE_BY_FIPS = new Map(Object.entries(STATE_FIPS).map(([state, fips]) => [fips, state]));
+
+/**
+ * The no_results hint for a 5-digit county code whose state prefix disagrees with `state` —
+ * NFIP holds a few such claims, so the code is still sent, and the mismatch is named only
+ * when it matched nothing. Undefined when the prefix agrees or `state` has no FIPS code.
+ */
+function stateMismatchHint(countyCode: string, state: string): string | undefined {
+  const fips = STATE_FIPS[state];
+  const prefix = countyCode.slice(0, 2);
+  if (!fips || prefix === fips) return;
+  const owner = STATE_BY_FIPS.get(prefix);
+  const lead = owner
+    ? `county_code ${countyCode} belongs to ${owner} (state FIPS ${prefix}), but state is ${state} (FIPS ${fips}), and a claim must match both.`
+    : `county_code ${countyCode} starts with ${prefix}, which is no state FIPS code; ${state} county codes start with ${fips}.`;
+  return `${lead} Send the ${state} county code (${fips} followed by the 3-digit county FIPS, or the 3 digits alone)${owner ? `, or set state to ${owner}` : ''}.`;
+}
 
 /**
  * Explicit DuckDB schema for NFIP canvas tables. All fields are nullable to
@@ -215,7 +235,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     'Search National Flood Insurance Program (NFIP) claims data by state, county, ZIP code, and year range. ' +
     'Returns the matching claim count and claim records — amounts paid on building and contents, damage estimates, flood zones, cause and occupancy codes, and loss dates — newest loss first. ' +
     'state is required — the full NFIP dataset is 2.7 million rows; unfiltered access is prohibited. ' +
-    'Page the inline claims with limit and offset; a page holds at most 100,000 characters of claims. ' +
+    'Page the inline claims with limit and offset; a page holds at most 100,000 characters of claims, and while claims remain past it, next_offset is the offset to continue from. ' +
     'When DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) and the match exceeds that inline budget, ' +
     'a call at offset 0 stages the match (up to 50,000 claims) on a canvas: inspect the staged table with fema_dataframe_describe, ' +
     'then aggregate it with SQL via fema_dataframe_query.',
@@ -232,7 +252,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .string()
       .optional()
       .describe(
-        'County code to narrow results within the state. Accepts the full 5-digit state+county FIPS (e.g., 48201 for Harris County TX) or the 3-digit county portion (e.g., 201) when state is provided — the server prepends the state FIPS automatically.',
+        'County FIPS code to narrow results within the state: the full 5-digit state+county code (e.g., 48201 for Harris County TX), or the 3-digit county part (e.g., 201), to which the server prepends the state FIPS. A shorter county part is zero-padded to 3 digits (1 → 001), and a 4-digit code is zero-padded to 5 (1001 → 01001), the form a numeric 01001 arrives in. Any other value is rejected before the search runs.',
       ),
     zip_code: z
       .string()
@@ -245,14 +265,14 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .min(1970)
       .max(2100)
       .optional()
-      .describe('Start year of loss, inclusive (e.g., 2020).'),
+      .describe('Start year of loss, inclusive (e.g., 2020). Not after year_to.'),
     year_to: z
       .number()
       .int()
       .min(1970)
       .max(2100)
       .optional()
-      .describe('End year of loss, inclusive (e.g., 2023).'),
+      .describe('End year of loss, inclusive (e.g., 2023). Equal to year_from for a single year.'),
     limit: z
       .number()
       .int()
@@ -260,7 +280,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .max(10000)
       .default(1000)
       .describe(
-        'Maximum claims to return inline (1–10000, default 1000). A page also stops at 100,000 characters of claims (roughly 330 claims); when either bound leaves matching claims out, the notice names the offset to continue from. When DataCanvas is enabled and the match exceeds that character budget, a call at offset 0 stages the match on a canvas regardless of this value.',
+        'Maximum claims to return inline (1–10000, default 1000). A page also stops at 100,000 characters of claims (roughly 330 claims); when either bound leaves matching claims out, next_offset names the offset to continue from. When DataCanvas is enabled and the match exceeds that character budget, a call at offset 0 stages the match on a canvas regardless of this value.',
       ),
     offset: z
       .number()
@@ -268,7 +288,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .min(0)
       .default(0)
       .describe(
-        'Pagination offset into the matching claims, ordered newest date of loss first (default 0). Use with limit to page through a match. Only a call at offset 0 stages a match on a canvas; a later offset returns just its inline page. After a spill (spilled=true), read rows past the inline claims from the canvas table with fema_dataframe_query.',
+        'Pagination offset into the matching claims, ordered newest date of loss first (default 0). Pass the previous page’s next_offset to continue. Only a call at offset 0 stages a match on a canvas; a later offset returns just its inline page. After a spill (spilled=true), read rows past the inline claims from the canvas table with fema_dataframe_query.',
       ),
     canvas_id: CanvasIdSchema.optional().describe(
       'Optional canvas ID from a prior call, to stage this match as another table on that canvas. Used only when the match is staged; omit it to stage on a fresh canvas. Pass the returned canvas_id to fema_dataframe_describe for the table columns, then to fema_dataframe_query for SQL.',
@@ -392,6 +412,15 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .describe(
         'Paging and canvas guidance: the offset to continue from when claims were left out, the last valid offset when offset is past the end, or the canvas table and dataframe tools after a spill.',
       ),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset of the next inline page: offset plus returned_count. Present only while matching claims remain past this page, after a spill too; pass it as offset to continue.',
+      ),
+  },
+  enrichmentTrailer: {
+    next_offset: { label: 'Next offset' },
   },
   errors: [
     {
@@ -400,6 +429,20 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       when: 'The state parameter is not a valid 2-letter US state/territory code.',
       recovery:
         'Provide a valid 2-letter US state code such as TX, CA, FL, or PR. Check the full list at FEMA.gov.',
+    },
+    {
+      reason: 'invalid_county_code',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'county_code is not 1–5 digits, or is a 1–3-digit county part for a state with no FIPS code (FM, MH, PW).',
+      recovery:
+        'Send county_code as the 3-digit county FIPS (e.g., 201 for Harris County TX) or the full 5-digit state+county FIPS (e.g., 48201), or omit it.',
+    },
+    {
+      reason: 'invalid_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'year_from is later than year_to, so no claim could match.',
+      recovery:
+        'Swap year_from and year_to so year_from is the earlier year; equal years select a single year.',
     },
     {
       reason: 'no_results',
@@ -416,21 +459,48 @@ export const femaSearchNfip = tool('fema_search_nfip', {
         ...ctx.recoveryFor('invalid_state'),
       });
     }
+    if (input.year_from != null && input.year_to != null && input.year_from > input.year_to) {
+      throw ctx.fail(
+        'invalid_range',
+        `year_from ${input.year_from} is after year_to ${input.year_to}, so no claim can match.`,
+      );
+    }
 
-    // Normalize a bare 3-digit county code to the full 5-digit state+county FIPS.
-    // NFIP data stores countyCode as 5-digit FIPS; a 3-digit value silently returns zero rows.
-    let countyCode = input.county_code?.trim() ?? '';
-    if (countyCode.length === 3) {
-      const stateFips = STATE_FIPS[input.state.toUpperCase()];
-      if (stateFips) {
-        countyCode = stateFips + countyCode;
+    /**
+     * NFIP stores countyCode as the 5-digit state+county FIPS, so every other form matches
+     * nothing. A 1–3-digit county part takes the state's FIPS prefix; a 4-digit code is a
+     * 5-digit one that lost its leading zero (a numeric 01001 arrives as "1001").
+     */
+    const countyInput = input.county_code?.trim() ?? '';
+    let countyCode: string | undefined;
+    if (countyInput) {
+      if (!/^\d{1,5}$/.test(countyInput)) {
+        throw ctx.fail(
+          'invalid_county_code',
+          `county_code "${countyInput}" is not a county FIPS code: send the 3-digit county part or the 5-digit state+county code.`,
+        );
+      }
+      if (countyInput.length <= 3) {
+        const stateFips = STATE_FIPS[input.state];
+        if (!stateFips) {
+          throw ctx.fail(
+            'invalid_county_code',
+            `${input.state} has no state FIPS code to prefix county_code "${countyInput}" with: send the full 5-digit state+county code.`,
+            {
+              recovery: {
+                hint: `${input.state} has no state FIPS code to complete a county part with, so send county_code as the full 5-digit state+county FIPS code, or omit it.`,
+              },
+            },
+          );
+        }
+        countyCode = stateFips + countyInput.padStart(3, '0');
+      } else {
+        countyCode = countyInput.padStart(5, '0');
       }
     }
 
     const filterParts: string[] = [`state eq '${escapeODataString(input.state)}'`];
-    if (countyCode) {
-      filterParts.push(`countyCode eq '${escapeODataString(countyCode)}'`);
-    }
+    if (countyCode) filterParts.push(`countyCode eq '${countyCode}'`);
     if (input.zip_code?.trim()) {
       filterParts.push(`reportedZipCode eq '${escapeODataString(input.zip_code)}'`);
     }
@@ -459,9 +529,12 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     );
     const total = first.count;
     if (total === 0) {
-      throw ctx.fail('no_results', `No NFIP claims matched the filters for ${input.state}.`, {
-        ...ctx.recoveryFor('no_results'),
-      });
+      const mismatch = countyCode && stateMismatchHint(countyCode, input.state);
+      throw ctx.fail(
+        'no_results',
+        `No NFIP claims matched the filters for ${input.state}.`,
+        mismatch ? { recovery: { hint: mismatch } } : ctx.recoveryFor('no_results'),
+      );
     }
     if (offset >= total) {
       ctx.enrich.notice(
@@ -476,6 +549,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     const inline = (rows: CanvasRow[]) => {
       const next = offset + rows.length;
       if (next < total) {
+        ctx.enrich({ next_offset: next });
         const budget =
           rows.length < limit ? ', the most that fit the 100,000-character inline budget' : '';
         ctx.enrich.notice(
@@ -553,6 +627,8 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     // Tied to the cap, not to staged < total: a match OpenFEMA updates mid-drain can also differ.
     const truncated = staged === MAX_CANVAS_ROWS && total > staged;
     const claims = previewRows.slice(0, limit);
+    // A spill happens at offset 0 only, and only for a match larger than its preview.
+    if (claims.length < total) ctx.enrich({ next_offset: claims.length });
     const where = `table "${handle.tableName}" (canvas_id "${instance.canvasId}")`;
     ctx.enrich.notice(
       (truncated

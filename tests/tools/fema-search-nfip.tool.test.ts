@@ -96,6 +96,7 @@ interface NfipOut {
   canvas_id?: string;
   canvas_table?: string;
   claims: Array<Record<string, unknown>>;
+  next_offset?: number;
   notice?: string;
   returned_count: number;
   spilled: boolean;
@@ -224,6 +225,170 @@ describe('fema_search_nfip — request shape', () => {
   });
 });
 
+describe('fema_search_nfip — county_code forms and the year range (#45)', () => {
+  /** The `$filter` of the one request a successful search sends. */
+  async function filterSent(input: Record<string, unknown>): Promise<string | undefined> {
+    fetchMock.mockImplementation(nfipMatch(3));
+    const result = await search(input);
+    expect(result.isError).not.toBe(true);
+    const urls = calledUrls(fetchMock);
+    expect(urls).toHaveLength(1);
+    return param(urls[0] ?? '', 'filter');
+  }
+
+  type ErrorEnvelope = {
+    code: number;
+    message: string;
+    data: { reason: string; recovery: { hint: string } };
+  };
+  const errorOf = (result: ContractResult) =>
+    (result.structuredContent as { error: ErrorEnvelope }).error;
+
+  /** A search rejected before any request, with `reason` and its declared recovery on both surfaces. */
+  async function rejected(input: Record<string, unknown>, reason: string) {
+    const result = await search(input);
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe(reason);
+    const declared = femaSearchNfip.errors?.find((e) => e.reason === reason);
+    expect(declared).toBeDefined();
+    expect(error.data.recovery.hint).toBe(declared?.recovery);
+    expect(text(result)).toContain(declared?.recovery ?? '');
+    expect(fetchMock).not.toHaveBeenCalled();
+    return error.message;
+  }
+
+  it.each([
+    ['TX', '201', '48201'],
+    ['TX', 201, '48201'],
+    ['TX', ' 201 ', '48201'],
+    ['TX', '48201', '48201'],
+    ['TX', '22029', '22029'],
+    ['AL', '001', '01001'],
+    ['AL', '01001', '01001'],
+  ])('%s county_code %j sends countyCode %s', async (state, county_code, sent) => {
+    expect(await filterSent({ state, county_code })).toBe(
+      `state eq '${state}' and countyCode eq '${sent}'`,
+    );
+  });
+
+  it.each([
+    ['AL', '1', '01001'],
+    ['AL', '01', '01001'],
+    ['AL', 1001, '01001'],
+    ['AL', '1001', '01001'],
+    ['TX', '0201', '00201'],
+  ])('zero-pads %s county_code %j to %s', async (state, county_code, sent) => {
+    expect(await filterSent({ state, county_code })).toBe(
+      `state eq '${state}' and countyCode eq '${sent}'`,
+    );
+  });
+
+  it.each(['', '   '])('treats county_code %j as unset', async (county_code) => {
+    expect(await filterSent({ county_code })).toBe("state eq 'TX'");
+  });
+
+  it.each(['abc', '2O1', '048201', '48-201', '4820 1', '+201'])(
+    'rejects county_code %j as invalid_county_code before fetching',
+    async (county_code) => {
+      expect(await rejected({ county_code }, 'invalid_county_code')).toContain(county_code);
+    },
+  );
+
+  it.each(['FM', 'MH', 'PW'])(
+    'rejects a 1–3-digit county_code for %s, which has no state FIPS code, instead of sending it bare',
+    async (state) => {
+      const result = await search({ state, county_code: '101' });
+      expect(result.isError).toBe(true);
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data.reason).toBe('invalid_county_code');
+      expect(error.message).toContain(state);
+      expect(error.message).toMatch(/5-digit/);
+      // The declared recovery leads with the 3-digit form, the one that just failed for this state.
+      expect(error.data.recovery.hint).toContain(state);
+      expect(error.data.recovery.hint).toMatch(/5-digit/);
+      expect(error.data.recovery.hint).not.toMatch(/3-digit/);
+      expect(text(result)).toContain(error.data.recovery.hint);
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('describes the accepted county_code forms in the field description', () => {
+    const d = femaSearchNfip.input.shape.county_code.description ?? '';
+    expect(d).toMatch(/5-digit/);
+    expect(d).toMatch(/3-digit/);
+    expect(d).toMatch(/zero-pad/i);
+  });
+
+  it('rejects year_from after year_to as invalid_range, naming both bounds, before fetching', async () => {
+    const message = await rejected(
+      { zip_code: '77002', year_from: 2018, year_to: 2017, offset: 1, limit: 1 },
+      'invalid_range',
+    );
+    expect(message).toContain('year_from 2018');
+    expect(message).toContain('year_to 2017');
+  });
+
+  it('keeps equal year bounds valid', async () => {
+    expect(await filterSent({ year_from: 2017, year_to: 2017 })).toBe(
+      "state eq 'TX' and yearOfLoss ge 2017 and yearOfLoss le 2017",
+    );
+  });
+
+  it('names the state mismatch in the no_results hint for a 5-digit code from another state', async () => {
+    fetchMock.mockImplementation(nfipMatch(0));
+    const result = await search({ county_code: '22071' });
+    expect(param(calledUrls(fetchMock)[0] ?? '', 'filter')).toBe(
+      "state eq 'TX' and countyCode eq '22071'",
+    );
+    const error = errorOf(result);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_results' },
+    });
+    expect(error.data.recovery.hint).toBe(
+      'county_code 22071 belongs to LA (state FIPS 22), but state is TX (FIPS 48), and a claim must match both. Send the TX county code (48 followed by the 3-digit county FIPS, or the 3 digits alone), or set state to LA.',
+    );
+    expect(text(result)).toContain(error.data.recovery.hint);
+  });
+
+  it('names a prefix that is no state FIPS code in the no_results hint', async () => {
+    fetchMock.mockImplementation(nfipMatch(0));
+    const { hint } = errorOf(await search({ county_code: '0201' })).data.recovery;
+    expect(hint).toBe(
+      'county_code 00201 starts with 00, which is no state FIPS code; TX county codes start with 48. Send the TX county code (48 followed by the 3-digit county FIPS, or the 3 digits alone).',
+    );
+  });
+
+  it('keeps the declared no_results recovery when the county code matches the state', async () => {
+    fetchMock.mockImplementation(nfipMatch(0));
+    const { hint } = errorOf(await search({ county_code: '201' })).data.recovery;
+    expect(hint).toBe(femaSearchNfip.errors?.find((e) => e.reason === 'no_results')?.recovery);
+  });
+
+  it('returns the claim stored under another state’s county prefix', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [
+          NFIP_V3,
+          () =>
+            envelopeResponse(
+              'NfipClaims',
+              [{ state: 'TX', countyCode: '22029', reportedZipCode: '77302' }],
+              1,
+              'v3',
+            ),
+        ],
+      ]),
+    );
+    const o = out(await search({ county_code: '22029' }));
+    expect(o).toMatchObject({ total_count: 1, returned_count: 1 });
+    expect(o.claims).toEqual([{ state: 'TX', county_code: '22029', zip_code: '77302' }]);
+  });
+});
+
 describe('fema_search_nfip — canvas disabled', () => {
   it('pages a 187-claim match with limit 100 at offsets 0 and 100, every claim exactly once', async () => {
     fetchMock.mockImplementation(nfipMatch(187));
@@ -317,6 +482,22 @@ describe('fema_search_nfip — canvas disabled', () => {
     expect(o.notice).toBe(
       `Returned ${fit} of the 2000 matching claims from offset 0, the most that fit the 100,000-character inline budget; continue with offset ${fit}.`,
     );
+  });
+
+  it('pages a budget-cut match by next_offset until it is absent, every claim exactly once', async () => {
+    fetchMock.mockImplementation(nfipMatch(2000));
+    const seen: number[] = [];
+    let offset: number | undefined = 0;
+    let pages = 0;
+    while (offset !== undefined) {
+      const o = out(await search({ offset }));
+      seen.push(...ids(o));
+      expect(o.next_offset ?? o.total_count).toBe(offset + o.returned_count);
+      offset = o.next_offset;
+      pages += 1;
+    }
+    expect(pages).toBeGreaterThan(5);
+    expect(seen).toEqual(range(0, 2000));
   });
 
   it('continues a budget-cut page from the offset the notice names', async () => {
@@ -517,6 +698,23 @@ describe('fema_search_nfip — canvas enabled, match overflows the preview', () 
       ['1000', '10'],
     ]);
   });
+
+  it('pages from a spill by next_offset until it is absent, every claim exactly once', async () => {
+    useCanvas();
+    fetchMock.mockImplementation(nfipMatch(1000));
+    const first = out(await search({}));
+    expect(first.spilled).toBe(true);
+    expect(first.next_offset).toBe(first.returned_count);
+    const seen = ids(first);
+    let offset = first.next_offset;
+    while (offset !== undefined) {
+      const o = out(await search({ offset }));
+      expect(o.spilled).toBe(false);
+      seen.push(...ids(o));
+      offset = o.next_offset;
+    }
+    expect(seen).toEqual(range(0, 1000));
+  }, 20_000);
 
   it('keeps paging a spilled match after the spill filled the tenant canvas pool', async () => {
     const c = useCanvas(1);
@@ -850,6 +1048,15 @@ describe('fema_search_nfip — notice matrix', () => {
       if (kind === 'continuation') {
         const offset = (input.offset as number | undefined) ?? 0;
         expect(notice).toContain(`continue with offset ${offset + out(result).returned_count}.`);
+      }
+      // next_offset is set exactly when claims remain past the page: a continuation, or a spill's preview.
+      if (kind === 'continuation' || kind === 'spill' || kind === 'spill-capped') {
+        const offset = (input.offset as number | undefined) ?? 0;
+        expect(out(result).next_offset).toBe(offset + out(result).returned_count);
+        expect(text(result)).toContain(`**Next offset:** ${out(result).next_offset}`);
+      } else if (!result.isError) {
+        expect(out(result)).not.toHaveProperty('next_offset');
+        expect(text(result)).not.toContain('Next offset');
       }
       // A canvas exists only for a spill without a held canvas, or for the held one.
       if (c) {
