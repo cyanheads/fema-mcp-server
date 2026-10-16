@@ -3,7 +3,7 @@
  * @module tests/tools/fema-dataframe-drop.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaDataframeDrop } from '@/mcp-server/tools/definitions/fema-dataframe-drop.tool.js';
@@ -83,6 +83,33 @@ describe('femaDataframeDrop', () => {
         recovery: { hint: expect.stringContaining('CANVAS_PROVIDER_TYPE') },
       },
     });
+  });
+
+  it('re-raises canvas_not_found with a drop-specific recovery hint', async () => {
+    const missing = new McpError(JsonRpcErrorCode.NotFound, 'Canvas not found.', {
+      reason: 'canvas_not_found',
+      recovery: { hint: 'Re-stage the data to create a new canvas.' },
+    });
+    await setCanvasMock({ acquire: vi.fn().mockRejectedValue(missing) });
+    const ctx = createMockContext({ errors: femaDataframeDrop.errors });
+    const input = femaDataframeDrop.input.parse({
+      canvas_id: 'Ab_012-xy9',
+      table_name: 'df_nfip_abc123',
+    });
+
+    const error = await Promise.resolve(femaDataframeDrop.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    );
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'canvas_not_found',
+        recovery: { hint: expect.stringContaining('nothing is left to drop') },
+      },
+    });
+    expect((error as Error).cause).toBe(missing);
+    expect(drop).not.toHaveBeenCalled();
   });
 
   it('formats both drop outcomes', () => {

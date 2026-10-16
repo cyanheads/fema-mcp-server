@@ -5,7 +5,7 @@
 
 import { disabledTool, tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 
@@ -37,10 +37,10 @@ const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
   errors: [
     {
       reason: 'canvas_not_found',
-      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id does not correspond to an active canvas session.',
-      recovery: 'Re-run fema_search_nfip to stage a fresh canvas, then use the new canvas_id.',
+      recovery:
+        'The canvas has expired or never existed, so nothing is left to drop; no further action is needed.',
     },
     {
       reason: 'canvas_unavailable',
@@ -62,7 +62,17 @@ const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
       );
     }
 
-    const instance = await canvas.acquire(input.canvas_id, ctx);
+    const instance = await canvas.acquire(input.canvas_id, ctx).catch((error: unknown) => {
+      if (error instanceof McpError && error.data?.reason === 'canvas_not_found') {
+        throw ctx.fail(
+          'canvas_not_found',
+          `Canvas ${input.canvas_id} is not active.`,
+          ctx.recoveryFor('canvas_not_found'),
+          { cause: error },
+        );
+      }
+      throw error;
+    });
     const dropped = await instance.drop(input.table_name);
 
     ctx.log.info('DataCanvas table drop complete', {
