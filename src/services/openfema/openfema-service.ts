@@ -93,10 +93,6 @@ function requestTooLong(urlLength: number, ctx: Context): McpError {
 const CATALOG_DATASET = 'OpenFemaDataSets';
 const CATALOG_VERSION = 1;
 
-/**
- * Map each catalog entry's `webService` path segment and its catalog `name` — OpenFEMA serves
- * both (`OpenFemaDataSetFields` and `DataSetFields`) — to the highest version the catalog lists.
- */
 /** A data-page URL as a lookup key: OpenFEMA links the same page in different letter cases. */
 const pageKey = (url: string) => url.trim().toLowerCase().replace(/\/+$/, '');
 
@@ -114,6 +110,10 @@ function buildPageMap(rows: OpenFemaCatalogRow[]): Map<string, string> {
   return pages;
 }
 
+/**
+ * Map each catalog entry's `webService` path segment and its catalog `name` — OpenFEMA serves
+ * both (`OpenFemaDataSetFields` and `DataSetFields`) — to the highest version the catalog lists.
+ */
 function buildVersionMap(rows: OpenFemaCatalogRow[]): Map<string, number> {
   const versions = new Map<string, number>();
   for (const { name, version, webService } of rows) {
