@@ -5,8 +5,70 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import {
+  continuationNotice,
+  maxRowsWithinBudget,
+  rowCharge,
+  rowsWithinBudget,
+} from '@/mcp-server/tools/response-budget.js';
+import { anySubstringFilter, countySpellings } from '@/services/openfema/name-matcher.js';
+import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 import { US_STATES } from '@/services/openfema/us-states.js';
+
+/** A project as the tool returns it. */
+interface Project {
+  applicant_id?: string | undefined;
+  application_title?: string | undefined;
+  county?: string | undefined;
+  damage_category_code?: string | undefined;
+  damage_category_description?: string | undefined;
+  disaster_number: number;
+  federal_share_obligated?: number | undefined;
+  first_obligation_date?: string | undefined;
+  project_amount?: number | undefined;
+  project_size?: string | undefined;
+  project_status?: string | undefined;
+  pw_number?: number | undefined;
+  state?: string | undefined;
+  total_obligated?: number | undefined;
+}
+
+/** The text block `format()` renders for one project — also what the response budget charges it. */
+function renderProject(p: Project): string {
+  const lines: string[] = [];
+  const title = p.application_title ?? `PW-${p.pw_number ?? 'unknown'}`;
+  lines.push(`## ${title}`);
+  lines.push(`**Disaster:** #${p.disaster_number}`);
+  if (p.applicant_id) lines.push(`**Applicant ID:** ${p.applicant_id}`);
+  if (p.damage_category_code) {
+    lines.push(
+      `**Damage Category:** ${p.damage_category_code}${p.damage_category_description ? ` — ${p.damage_category_description}` : ''}`,
+    );
+  }
+  if (p.total_obligated != null) {
+    lines.push(`**Total Obligated:** $${p.total_obligated.toLocaleString()}`);
+  }
+  if (p.federal_share_obligated != null) {
+    lines.push(`**Federal Share Obligated:** $${p.federal_share_obligated.toLocaleString()}`);
+  }
+  if (p.project_amount != null) {
+    lines.push(`**Project Amount:** $${p.project_amount.toLocaleString()}`);
+  }
+  const meta: string[] = [];
+  if (p.project_status) meta.push(`Status: ${p.project_status}`);
+  if (p.project_size) meta.push(`Size: ${p.project_size}`);
+  if (p.county) meta.push(`County: ${p.county}`);
+  if (p.state) meta.push(`State: ${p.state}`);
+  if (p.pw_number) meta.push(`PW: ${p.pw_number}`);
+  if (meta.length > 0) lines.push(meta.join(' | '));
+  if (p.first_obligation_date) lines.push(`**First Obligated:** ${p.first_obligation_date}`);
+  return lines.join('\n');
+}
+
+const projectCharge = (p: Project) => rowCharge(p, renderProject(p));
+
+/** No project costs less than one carrying only its disaster number, so no page holds more. */
+const MAX_PAGE_ROWS = maxRowsWithinBudget(projectCharge({ disaster_number: 0 }));
 
 export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   title: 'Get FEMA Public Assistance Projects',
@@ -15,7 +77,8 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     'Returns applicant, damage category, project size and status, federal share obligated, and total obligated amounts. ' +
     'Either disaster_number or state must be provided. ' +
     'Use disaster_number (from fema_search_disasters) to scope to a single declaration, or state to browse all PA projects for a state. ' +
-    'PA projects are created only when the PA program is declared (pa_declared: true on the disaster).',
+    'PA projects are created only when the PA program is declared (pa_declared: true on the disaster). ' +
+    'A page holds at most 100,000 characters of projects; when projects remain past it, next_offset is the offset to continue from.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     disaster_number: z
@@ -32,15 +95,27 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       .toUpperCase()
       .optional()
       .describe('Two-letter state code to browse all PA projects for a state.'),
-    county: z.string().optional().describe('Filter by county name substring.'),
+    county: z
+      .string()
+      .optional()
+      .describe(
+        'Filter by county name (e.g., Harris, dekalb). Case-insensitive substring match: harris also matches Harrison.',
+      ),
     limit: z
       .number()
       .int()
       .min(1)
-      .max(1000)
+      .max(10000)
       .default(100)
-      .describe('Maximum number of projects to return (1–1000, default 100).'),
-    offset: z.number().int().min(0).default(0).describe('Pagination offset (default 0).'),
+      .describe(
+        'Maximum number of projects to return (1–10000, default 100). A page also stops at 100,000 characters of projects (roughly 220 projects); when either bound leaves matching projects out, next_offset names the offset to continue from.',
+      ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Pagination offset (default 0). Pass the previous page’s next_offset to continue.'),
   }),
   output: z.object({
     projects: z
@@ -77,7 +152,9 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
             project_amount: z
               .number()
               .optional()
-              .describe('Total estimated project cost in USD. Absent when not yet determined.'),
+              .describe(
+                "Estimated total eligible cost of the project in USD from FEMA's damage survey, without administrative costs. Absent when not yet determined.",
+              ),
             federal_share_obligated: z
               .number()
               .optional()
@@ -88,7 +165,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
               .number()
               .optional()
               .describe(
-                'Total obligated amount across all funding sources in USD; 0 when nothing is obligated.',
+                'Federal share of the eligible project amount plus State (recipient) and applicant (subrecipient) administrative costs, in USD; equals federal_share_obligated when no administrative costs are recorded. Holds no non-federal share. 0 when nothing is obligated.',
               ),
             county: z
               .string()
@@ -102,13 +179,13 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
               .string()
               .optional()
               .describe(
-                'Current project status (e.g., Obligated, Closed, In Progress). Absent when not set.',
+                'Eligibility status of the project: Eligible (nearly all projects), Pending Eligibility Review, Ineligible, or Withdrawn. Absent when not set.',
               ),
             project_size: z
               .string()
               .optional()
               .describe(
-                'Project size classification: "small" (≤$1M) or "large" (>$1M). Absent when unclassified.',
+                'Large or Small, set by comparing the eligible amount from the damage survey with the large-project threshold FEMA sets for each fiscal year. Absent when unclassified.',
               ),
             first_obligation_date: z
               .string()
@@ -119,7 +196,9 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
           })
           .describe('A single Public Assistance funded project record.'),
       )
-      .describe('Public assistance funded project records.'),
+      .describe(
+        'Public assistance funded project records from offset onward, bounded by limit and by 100,000 characters of projects.',
+      ),
     total_count: z.number().describe('Total matching projects before pagination.'),
     returned_count: z.number().describe('Number of projects in this response.'),
   }),
@@ -128,7 +207,13 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       .string()
       .optional()
       .describe(
-        'Paging guidance when offset is at or past the end of the matching projects — names the total and the last valid offset.',
+        'Paging guidance: the offset to continue from and whether limit or the response budget ended the page, or, when offset is at or past the end, the total and the last valid offset.',
+      ),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset of the next page: offset plus returned_count. Present only while matching projects remain past this page; pass it as offset to continue.',
       ),
     totalCount: z
       .number()
@@ -136,6 +221,9 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       .describe(
         'Total matching projects before pagination — exceeds returned_count when results were capped at the limit.',
       ),
+  },
+  enrichmentTrailer: {
+    next_offset: { label: 'Next offset' },
   },
   errors: [
     {
@@ -165,6 +253,14 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       when: 'No PA project records found for the given filters.',
       recovery:
         'Verify the disaster has PA declared (pa_declared: true via fema_get_disaster) or check the state code. Recent disasters may have incomplete records.',
+    },
+    {
+      reason: 'request_too_long',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The county value makes the request URL longer than the roughly 8,900 characters OpenFEMA accepts.',
+      recovery:
+        'Shorten county to the county name being searched for; stored county names are a few words long.',
     },
   ],
 
@@ -197,16 +293,15 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     if (input.state?.trim()) {
       filterParts.push(`stateAbbreviation eq '${input.state}'`);
     }
-    if (input.county?.trim()) {
-      filterParts.push(`substringof('${escapeODataString(input.county)}', county)`);
-    }
+    const counties = countySpellings(input.county ?? '');
+    if (counties.length > 0) filterParts.push(anySubstringFilter('county', counties));
 
     const svc = getOpenFemaService();
     const { rows, count } = await svc.fetchPaProjects(
       {
         filter: filterParts.join(' and '),
         orderby: 'totalObligated desc',
-        top: input.limit,
+        top: Math.min(input.limit, MAX_PAGE_ROWS),
         skip: input.offset,
       },
       ctx,
@@ -221,7 +316,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       });
     }
 
-    const projects = rows.map((r) => ({
+    const fetched: Project[] = rows.map((r) => ({
       disaster_number: r.disasterNumber ?? 0,
       ...(r.pwNumber ? { pw_number: r.pwNumber } : {}),
       ...(r.applicantId ? { applicant_id: r.applicantId } : {}),
@@ -240,48 +335,36 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       ...(r.firstObligationDate ? { first_obligation_date: r.firstObligationDate } : {}),
     }));
 
+    const returned = rowsWithinBudget(fetched.length, (i) =>
+      projectCharge(fetched[i] ?? { disaster_number: 0 }),
+    );
+    const projects = fetched.slice(0, returned);
+    const nextOffset = input.offset + returned;
+
     ctx.enrich.total(count);
     if (projects.length === 0) {
       ctx.enrich.notice(
         `Offset ${input.offset} is past the end of the ${count} matching PA projects; the last valid offset is ${count - 1}.`,
       );
+    } else if (nextOffset < count) {
+      ctx.enrich({ next_offset: nextOffset });
+      ctx.enrich.notice(
+        continuationNotice(
+          `${returned} of the ${count} matching PA projects`,
+          input.offset,
+          nextOffset,
+          returned < input.limit,
+        ),
+      );
     }
-    ctx.log.info('PA projects fetch complete', { count, returned: projects.length });
-    return { projects, total_count: count, returned_count: projects.length };
+    ctx.log.info('PA projects fetch complete', { count, returned, fetched: fetched.length });
+    return { projects, total_count: count, returned_count: returned };
   },
 
   format: (result) => {
     const lines: string[] = [];
     lines.push(`**${result.returned_count} of ${result.total_count} PA projects**\n`);
-    for (const p of result.projects) {
-      const title = p.application_title ?? `PW-${p.pw_number ?? 'unknown'}`;
-      lines.push(`## ${title}`);
-      lines.push(`**Disaster:** #${p.disaster_number}`);
-      if (p.applicant_id) lines.push(`**Applicant ID:** ${p.applicant_id}`);
-      if (p.damage_category_code) {
-        lines.push(
-          `**Damage Category:** ${p.damage_category_code}${p.damage_category_description ? ` — ${p.damage_category_description}` : ''}`,
-        );
-      }
-      if (p.total_obligated != null) {
-        lines.push(`**Total Obligated:** $${p.total_obligated.toLocaleString()}`);
-      }
-      if (p.federal_share_obligated != null) {
-        lines.push(`**Federal Share Obligated:** $${p.federal_share_obligated.toLocaleString()}`);
-      }
-      if (p.project_amount != null) {
-        lines.push(`**Project Amount:** $${p.project_amount.toLocaleString()}`);
-      }
-      const meta: string[] = [];
-      if (p.project_status) meta.push(`Status: ${p.project_status}`);
-      if (p.project_size) meta.push(`Size: ${p.project_size}`);
-      if (p.county) meta.push(`County: ${p.county}`);
-      if (p.state) meta.push(`State: ${p.state}`);
-      if (p.pw_number) meta.push(`PW: ${p.pw_number}`);
-      if (meta.length > 0) lines.push(meta.join(' | '));
-      if (p.first_obligation_date) lines.push(`**First Obligated:** ${p.first_obligation_date}`);
-      lines.push('');
-    }
+    for (const p of result.projects) lines.push(renderProject(p), '');
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
