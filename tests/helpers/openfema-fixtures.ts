@@ -4,7 +4,7 @@
  * @module tests/helpers/openfema-fixtures
  */
 
-/** Rows from `GET /api/open/v1/OpenFemaDataSets?$select=name,version,webService`, in live order. */
+/** Rows from `GET /api/open/v1/OpenFemaDataSets?$select=name,version,webService` (the `dataDictionary` page omitted), in live order. */
 export const CATALOG_ROWS = [
   /** Listed with `api: true`, but its endpoint answers every version with the HTML 404 page. */
   {
@@ -270,7 +270,29 @@ export const ERROR_BODIES = {
   },
   /** `disasterNumber,,` select or `declarationDate sideways` orderby — untyped parser error. */
   untypedFailAtZero: { error: [{ name: 'Error', message: 'Fail at 0' }] },
+  /** A filter of 94 or more `or`-joined comparisons (captured 2026-10-16). */
+  filterTooDeep: {
+    error: [
+      {
+        name: 'OData Query Parser Error',
+        code: 'OF_OQP_000',
+        type: 'Unknown error',
+        message: 'Query too complex - maximum nesting depth of 100 exceeded',
+      },
+    ],
+  },
 };
+
+/**
+ * The CDN's HTML 400 for a request URL longer than about 8,900 characters (captured
+ * 2026-10-16) — OpenFEMA itself never sees the request.
+ */
+export function cdnBadRequestResponse(): Response {
+  return new Response(
+    '<HTML><HEAD>\n<TITLE>Bad Request</TITLE>\n</HEAD><BODY>\n<H1>Bad Request</H1>\nYour browser sent a request that this server could not understand.<P>\nReference&#32;&#35;7&#46;d037cb17&#46;1792159909&#46;2b165d12\n</BODY>\n</HTML>\n',
+    { status: 400, headers: { 'content-type': 'text/html' } },
+  );
+}
 
 /** A JSON response with the given status. */
 export function jsonResponse(status: number, body: unknown): Response {

@@ -17,7 +17,10 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
+  DatasetDeprecation,
+  DatasetPage,
   OpenFemaCatalogRow,
+  OpenFemaDeprecationInformation,
   OpenFemaEnvelope,
   OpenFemaErrorDetail,
   OpenFemaErrorResponse,
@@ -56,9 +59,31 @@ function buildODataQuery(opts: OpenFemaQueryOptions): string {
   return parts.join('&');
 }
 
-/** Detect HTML response (Drupal 404 pages). */
+/** Detect HTML response (Drupal 404 pages, the CDN's 400 page). */
 function isHtmlResponse(text: string): boolean {
   return /^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text);
+}
+
+/**
+ * URL length past which an HTML 400 is the CDN refusing an over-long request. The CDN in front
+ * of OpenFEMA answers URLs past about 8,900 characters with its own HTML 400 before OpenFEMA
+ * sees them, whatever the endpoint (measured 2026-10-16: refused between 8,909 and 8,912
+ * characters, the cutoff moving with the request's headers); below that, an unknown or
+ * unserved endpoint answers 404. An HTML 400 for a shorter URL keeps the missing-endpoint
+ * reading.
+ */
+const LONG_URL = 8_000;
+
+/** The CDN's measured cutoff, as the request_too_long message names it. */
+const CDN_URL_LIMIT = 8_900;
+
+/** A refused URL between LONG_URL and the cutoff is named close to the limit, never past it. */
+function requestTooLong(urlLength: number, ctx: Context): McpError {
+  const relation = urlLength > CDN_URL_LIMIT ? 'past' : 'close to';
+  return validationError(
+    `OpenFEMA refused the request: its URL is ${urlLength.toLocaleString('en-US')} characters long, ${relation} the roughly 8,900 characters OpenFEMA accepts.`,
+    { reason: 'request_too_long', urlLength, ...ctx.recoveryFor('request_too_long') },
+  );
 }
 
 /**
@@ -72,6 +97,23 @@ const CATALOG_VERSION = 1;
  * Map each catalog entry's `webService` path segment and its catalog `name` — OpenFEMA serves
  * both (`OpenFemaDataSetFields` and `DataSetFields`) — to the highest version the catalog lists.
  */
+/** A data-page URL as a lookup key: OpenFEMA links the same page in different letter cases. */
+const pageKey = (url: string) => url.trim().toLowerCase().replace(/\/+$/, '');
+
+/**
+ * Map each catalog entry's `dataDictionary` page to its catalog name — the page a deprecated
+ * version's `depNewUrl` points at, so the replacement can be named as a dataset.
+ */
+function buildPageMap(rows: OpenFemaCatalogRow[]): Map<string, string> {
+  const pages = new Map<string, string>();
+  for (const { name, dataDictionary } of rows) {
+    if (typeof name === 'string' && typeof dataDictionary === 'string' && dataDictionary.trim()) {
+      pages.set(pageKey(dataDictionary), name);
+    }
+  }
+  return pages;
+}
+
 function buildVersionMap(rows: OpenFemaCatalogRow[]): Map<string, number> {
   const versions = new Map<string, number>();
   for (const { name, version, webService } of rows) {
@@ -114,7 +156,12 @@ const notServed: MissingEndpoint = (dataset, ctx) =>
 // --- OpenFEMA 400 classification ---
 
 type ODataParam = 'filter' | 'select' | 'orderby';
-type ODataReason = 'invalid_filter' | 'invalid_select' | 'invalid_orderby' | 'invalid_odata_syntax';
+type ODataReason =
+  | 'invalid_filter'
+  | 'invalid_select'
+  | 'invalid_orderby'
+  | 'invalid_odata_syntax'
+  | 'filter_too_complex';
 
 const ODATA_PARAMS: readonly ODataParam[] = ['filter', 'select', 'orderby'];
 const REASON_BY_PARAM: Record<ODataParam, ODataReason> = {
@@ -139,6 +186,8 @@ const TYPE_ERROR =
 const UNREADABLE_VALUE = /Invalid (\w+) for "[^"]*"\."([^"]+)"/;
 const UNKNOWN_FIELD = /field "([^"]+)" not found/i;
 const FRACTIONAL = /Decimal|Double|Single/;
+/** `Query too complex - maximum nesting depth of 100 exceeded` — untyped, `OF_OQP_000`. */
+const NESTING_LIMIT = /maximum nesting depth/i;
 
 type FieldKind = 'date' | 'guid' | 'text' | 'boolean' | 'integer' | 'number';
 
@@ -193,14 +242,23 @@ function unreadableValueMessage(what: string, field: string): string {
 /**
  * Classify an OpenFEMA JSON 400 by the clause its `type` names. Messages are built
  * from the parameter and field names alone — upstream text (parse offsets, OData
- * type names) never reaches the caller. An untyped parser error is attributed to
- * the only expression supplied, or reported as `invalid_odata_syntax` when several were.
+ * type names) never reaches the caller. A filter past OpenFEMA's nesting limit is
+ * `filter_too_complex`; any other untyped parser error is attributed to the only
+ * expression supplied, or reported as `invalid_odata_syntax` when several were.
  */
 function classifyODataError(
   detail: OpenFemaErrorDetail,
   opts: OpenFemaQueryOptions,
   dataset: string,
 ): { reason: ODataReason; message: string } {
+  if (NESTING_LIMIT.test(detail.message ?? '')) {
+    return {
+      reason: 'filter_too_complex',
+      message:
+        'Invalid filter: the expression nests more than 100 levels deep, the most OpenFEMA allows. Every and/or adds a level, so a filter holds at most about 90 chained comparisons.',
+    };
+  }
+
   const clause = /\$(filter|select|orderby)\b/i.exec(detail.type ?? '')?.[1]?.toLowerCase() as
     | ODataParam
     | undefined;
@@ -253,13 +311,41 @@ function classifyODataError(
   return { reason, message: `Invalid ${clause}: OpenFEMA rejected the expression.` };
 }
 
+/** A non-blank string, trimmed; undefined otherwise. */
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/** The deprecation a response's `metadata.DeprecationInformation` carries, if any. */
+function readDeprecation(
+  info: OpenFemaDeprecationInformation | undefined,
+): DatasetDeprecation | undefined {
+  if (!info || typeof info !== 'object') return;
+  const date = text(info.depDate);
+  const message = text(info.depApiMessage) ?? text(info.depWebMessage);
+  const replacementUrl = text(info.depNewUrl);
+  if (!date && !message && !replacementUrl) return;
+  return {
+    ...(date ? { date } : {}),
+    ...(message ? { message } : {}),
+    ...(replacementUrl ? { replacementUrl } : {}),
+  };
+}
+
 // --- Service ---
 
 export class OpenFemaService {
   /** API root without a version segment, e.g. `https://www.fema.gov/api/open`. */
   private readonly apiRoot: string;
   private readonly timeoutMs: number;
-  private catalog: { versions: ReadonlyMap<string, number>; expiresAt: number } | undefined;
+  private catalog:
+    | {
+        versions: ReadonlyMap<string, number>;
+        /** Lowercased `dataDictionary` page → catalog name. */
+        pages: ReadonlyMap<string, string>;
+        expiresAt: number;
+      }
+    | undefined;
   private catalogRefresh: Promise<ReadonlyMap<string, number>> | undefined;
 
   constructor(_config: AppConfig, _storage: StorageService) {
@@ -270,32 +356,50 @@ export class OpenFemaService {
 
   /**
    * Fetch a page from any OpenFEMA dataset, at the API version the OpenFEMA dataset
-   * catalog lists for it. Returns the data array and total count from the response envelope.
+   * catalog lists for it. Returns the data array, the total count, and the version's
+   * deprecation notice when the response carries one, with the replacement's catalog name
+   * when its data page is listed. `deadlineMs` lowers the request's total retry budget below
+   * the configured timeout, for a caller chaining requests under one deadline.
    */
   async fetchDataset<T>(
     dataset: string,
     opts: OpenFemaQueryOptions,
     ctx: Context,
-  ): Promise<{ rows: T[]; count: number }> {
+    { deadlineMs }: { deadlineMs?: number } = {},
+  ): Promise<DatasetPage<T>> {
     const version = await this.resolveVersion(dataset, ctx);
     // The catalog lists itself only as `DataSets`, so its `OpenFemaDataSets` alias is no listed name.
     const missing = dataset === CATALOG_DATASET ? notAtOpenFema : notServed;
-    return this.request<T>(dataset, version, opts, ctx, missing);
+    const page = await this.request<T>(dataset, version, opts, ctx, missing, deadlineMs);
+    const url = page.deprecation?.replacementUrl;
+    const replacement = url ? this.catalog?.pages.get(pageKey(url)) : undefined;
+    if (!replacement || replacement === dataset || !page.deprecation) return page;
+    return { ...page, deprecation: { ...page.deprecation, replacementDataset: replacement } };
   }
 
-  /** Fetch disaster declaration summaries. */
+  /**
+   * Fetch disaster declaration summaries. `deadlineMs` lowers the request's total retry
+   * budget below the configured timeout, for a caller chaining requests under one deadline;
+   * `signal` ends the request early, alongside the request context's own cancellation.
+   */
   fetchDisasters(
     opts: OpenFemaQueryOptions,
     ctx: Context,
-  ): Promise<{ rows: RawDisasterDeclaration[]; count: number }> {
-    return this.request<RawDisasterDeclaration>('DisasterDeclarationsSummaries', 2, opts, ctx);
+    { deadlineMs, signal }: { deadlineMs?: number; signal?: AbortSignal } = {},
+  ): Promise<DatasetPage<RawDisasterDeclaration>> {
+    return this.request<RawDisasterDeclaration>(
+      'DisasterDeclarationsSummaries',
+      2,
+      opts,
+      ctx,
+      notAtOpenFema,
+      deadlineMs,
+      signal,
+    );
   }
 
   /** Fetch public assistance funded project details. */
-  fetchPaProjects(
-    opts: OpenFemaQueryOptions,
-    ctx: Context,
-  ): Promise<{ rows: RawPaProject[]; count: number }> {
+  fetchPaProjects(opts: OpenFemaQueryOptions, ctx: Context): Promise<DatasetPage<RawPaProject>> {
     return this.request<RawPaProject>('PublicAssistanceFundedProjectsDetails', 2, opts, ctx);
   }
 
@@ -304,15 +408,12 @@ export class OpenFemaService {
     dataset: 'HousingAssistanceOwners' | 'HousingAssistanceRenters',
     opts: OpenFemaQueryOptions,
     ctx: Context,
-  ): Promise<{ rows: RawHousingAssistance[]; count: number }> {
+  ): Promise<DatasetPage<RawHousingAssistance>> {
     return this.request<RawHousingAssistance>(dataset, 2, opts, ctx);
   }
 
   /** Fetch NFIP redacted claims (`NfipClaims` v3). */
-  fetchNfipClaims(
-    opts: OpenFemaQueryOptions,
-    ctx: Context,
-  ): Promise<{ rows: RawNfipClaim[]; count: number }> {
+  fetchNfipClaims(opts: OpenFemaQueryOptions, ctx: Context): Promise<DatasetPage<RawNfipClaim>> {
     return this.request<RawNfipClaim>('NfipClaims', 3, opts, ctx);
   }
 
@@ -365,7 +466,7 @@ export class OpenFemaService {
       const { rows } = await this.exchange<OpenFemaCatalogRow>(
         CATALOG_DATASET,
         CATALOG_VERSION,
-        { select: 'name,version,webService', top: 1000 },
+        { select: 'name,version,webService,dataDictionary', top: 1000 },
         ctx,
         { timeoutMs: this.timeoutMs, missing: notAtOpenFema },
       );
@@ -374,12 +475,16 @@ export class OpenFemaService {
         throw serviceUnavailable('The OpenFEMA dataset catalog listed no usable datasets.');
       }
       if (!versions.has(CATALOG_DATASET)) versions.set(CATALOG_DATASET, CATALOG_VERSION);
-      this.catalog = { versions, expiresAt: Date.now() + CATALOG_TTL_MS };
+      this.catalog = {
+        versions,
+        pages: buildPageMap(rows),
+        expiresAt: Date.now() + CATALOG_TTL_MS,
+      };
       ctx.log.debug('OpenFEMA dataset catalog refreshed', { datasets: versions.size });
       return versions;
     } catch (error) {
       if (!this.catalog) throw error;
-      this.catalog = { versions: this.catalog.versions, expiresAt: Date.now() + CATALOG_RETRY_MS };
+      this.catalog = { ...this.catalog, expiresAt: Date.now() + CATALOG_RETRY_MS };
       ctx.log.warning('OpenFEMA dataset catalog refresh failed; reusing the previous catalog', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -389,7 +494,9 @@ export class OpenFemaService {
 
   /**
    * Fetch one page of `entity` at `version`, retrying transient failures within the request
-   * budget. `missing` builds the error for an endpoint OpenFEMA answers with its 404 page.
+   * budget — the configured timeout, or `deadlineMs` when shorter. `missing` builds the error
+   * for an endpoint OpenFEMA answers with its 404 page. `signal` aborts the request and its
+   * retries like the request context's own signal does.
    */
   private request<T>(
     entity: string,
@@ -397,7 +504,9 @@ export class OpenFemaService {
     opts: OpenFemaQueryOptions,
     ctx: Context,
     missing: MissingEndpoint = notAtOpenFema,
-  ): Promise<{ rows: T[]; count: number }> {
+    deadlineMs = this.timeoutMs,
+    signal?: AbortSignal,
+  ): Promise<DatasetPage<T>> {
     return withRetry(
       ({ signal, remainingMs }) =>
         this.exchange<T>(entity, version, opts, ctx, {
@@ -409,8 +518,8 @@ export class OpenFemaService {
         operation: `OpenFemaService.request(${entity} v${version})`,
         context: ctx,
         baseDelayMs: 1000,
-        signal: ctx.signal,
-        deadlineMs: this.timeoutMs,
+        signal: signal ? AbortSignal.any([ctx.signal, signal]) : ctx.signal,
+        deadlineMs: Math.min(this.timeoutMs, deadlineMs),
       },
     );
   }
@@ -426,7 +535,7 @@ export class OpenFemaService {
       timeoutMs,
       missing,
     }: { signal?: AbortSignal; timeoutMs: number; missing: MissingEndpoint },
-  ): Promise<{ rows: T[]; count: number }> {
+  ): Promise<DatasetPage<T>> {
     const url = `${this.apiRoot}/v${version}/${entity}?${buildODataQuery(opts)}`;
     let response: Response;
     try {
@@ -444,6 +553,7 @@ export class OpenFemaService {
         status === 404 ||
         (status === 400 && (headers?.['content-type']?.includes('html') || isHtmlResponse(body)))
       ) {
+        if (status === 400 && url.length > LONG_URL) throw requestTooLong(url.length, ctx);
         throw missing(entity, ctx);
       }
       if (status === 400) {
@@ -485,14 +595,16 @@ export class OpenFemaService {
     // count is in envelope.metadata.count when $inlinecount=allpages is sent
     const count =
       typeof envelope.metadata?.count === 'number' ? envelope.metadata.count : rows.length;
+    const deprecation = readDeprecation(envelope.metadata?.DeprecationInformation);
 
     ctx.log.debug('OpenFEMA fetch complete', {
       dataset: entity,
-      version,
+      apiVersion: version,
       count,
       rows: rows.length,
+      ...(deprecation?.date ? { deprecationDate: deprecation.date } : {}),
     });
-    return { rows, count };
+    return { rows, count, ...(deprecation ? { deprecation } : {}) };
   }
 }
 

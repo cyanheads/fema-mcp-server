@@ -3,10 +3,25 @@
  * @module services/openfema/types
  */
 
+/**
+ * `metadata.DeprecationInformation` on a deprecated dataset version. Past `depDate` OpenFEMA
+ * keeps answering the version with HTTP 200 and its old count, but no records.
+ */
+export interface OpenFemaDeprecationInformation {
+  depApiMessage?: string | null;
+  /** ISO 8601 date the version stops being served. */
+  depDate?: string | null;
+  /** Web page describing the replacement dataset; null when there is none. */
+  depNewUrl?: string | null;
+  depWebMessage?: string | null;
+}
+
 /** Metadata block nested inside the OpenFEMA response envelope. */
 export interface OpenFemaMetadata {
   /** Total matching count — only populated when $inlinecount=allpages was sent. */
   count: number;
+  /** Present only on a deprecated dataset version. */
+  DeprecationInformation?: OpenFemaDeprecationInformation;
   entityname: string;
   filter: string;
   format: string;
@@ -45,12 +60,33 @@ export interface OpenFemaErrorResponse {
   error: OpenFemaErrorDetail[];
 }
 
-/** A row of the `OpenFemaDataSets` catalog, as selected by `name,version,webService`. */
+/** A row of the `OpenFemaDataSets` catalog, as selected by `name,version,webService,dataDictionary`. */
 export interface OpenFemaCatalogRow {
+  /** The version's data page — what a deprecated version's `depNewUrl` links to. */
+  dataDictionary?: string | null;
   name?: string;
   version?: number;
   /** Full endpoint URL; its last path segment is the entity name the API serves. */
   webService?: string;
+}
+
+/** A dataset version's deprecation, as the service reports it from `DeprecationInformation`. */
+export interface DatasetDeprecation {
+  /** ISO 8601 date the version stops being served, when OpenFEMA gives one. */
+  date?: string;
+  /** OpenFEMA's API message, trimmed. */
+  message?: string;
+  /** Catalog name of the replacement dataset, when the catalog lists its data page. */
+  replacementDataset?: string;
+  /** Web page describing the replacement dataset, when OpenFEMA names one. */
+  replacementUrl?: string;
+}
+
+/** One page of a dataset: its records, the total match count, and any deprecation notice. */
+export interface DatasetPage<T> {
+  count: number;
+  deprecation?: DatasetDeprecation;
+  rows: T[];
 }
 
 /** OData query options for OpenFEMA requests. */

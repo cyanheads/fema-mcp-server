@@ -18,6 +18,7 @@ import {
   CATALOG_URL,
   calledUrls,
   catalogResponse,
+  cdnBadRequestResponse,
   ERROR_BODIES,
   endpoint,
   envelopeResponse,
@@ -141,6 +142,51 @@ describe('convenience fetchers', () => {
     expect(calledUrls(fetchMock)[0]).not.toContain('FimaNfipClaims');
   });
 
+  it('reads metadata.DeprecationInformation into deprecation, trimmed, dropping a null replacement (#51)', async () => {
+    const serve = (dep: unknown) =>
+      fetchMock.mockImplementation(
+        routeFetch([
+          [
+            endpoint('NfipClaims', 3),
+            () =>
+              jsonResponse(200, {
+                metadata: { count: 56_410, entityname: 'NfipClaims', DeprecationInformation: dep },
+                NfipClaims: [],
+              }),
+          ],
+        ]),
+      );
+    serve({
+      depDate: '2026-10-15T00:00:00.000Z',
+      depApiMessage: 'Combined with the HMA Subapplications dataset.  ',
+      depNewUrl: 'https://www.fema.gov/openfema-data-page/hma-subapplications-v2',
+      depWebMessage: 'Web text.',
+    });
+    expect(await svc.fetchNfipClaims({ top: 1 }, createMockContext())).toEqual({
+      rows: [],
+      count: 56_410,
+      deprecation: {
+        date: '2026-10-15T00:00:00.000Z',
+        message: 'Combined with the HMA Subapplications dataset.',
+        replacementUrl: 'https://www.fema.gov/openfema-data-page/hma-subapplications-v2',
+      },
+    });
+    serve({
+      depDate: '2026-11-09T00:00:00.000Z',
+      depApiMessage: null,
+      depNewUrl: null,
+      depWebMessage: 'Frozen.',
+    });
+    expect((await svc.fetchNfipClaims({ top: 1 }, createMockContext())).deprecation).toEqual({
+      date: '2026-11-09T00:00:00.000Z',
+      message: 'Frozen.',
+    });
+    serve({ depDate: null, depApiMessage: '  ', depNewUrl: null });
+    expect(await svc.fetchNfipClaims({ top: 1 }, createMockContext())).not.toHaveProperty(
+      'deprecation',
+    );
+  });
+
   it('fails non-retryable HTTP responses once without exposing the query URL', async () => {
     vi.useFakeTimers();
     fetchMock.mockImplementation(() =>
@@ -187,6 +233,61 @@ describe('convenience fetchers', () => {
     expect(error.data.reason).toBe('retry_deadline_exceeded');
   });
 
+  it('ends a disaster request at a caller deadline shorter than the configured timeout', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(
+      (_url, options: RequestInit) =>
+        new Promise((_resolve, reject) =>
+          options.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+            once: true,
+          }),
+        ),
+    );
+    let settled = false;
+    const result = svc
+      .fetchDisasters({}, createMockContext(), { deadlineMs: 5_000 })
+      .catch((error) => {
+        settled = true;
+        return error;
+      });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(settled).toBe(true);
+    const error = await result;
+    expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data).toMatchObject({ reason: 'retry_deadline_exceeded', deadlineMs: 5_000 });
+  });
+
+  it('ends a disaster request the moment its caller signal aborts, without a retry', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(
+      (_url, options: RequestInit) =>
+        new Promise((_resolve, reject) =>
+          options.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+            once: true,
+          }),
+        ),
+    );
+    const controller = new AbortController();
+    const ctx = createMockContext();
+    let settled = false;
+    const result = svc.fetchDisasters({}, ctx, { signal: controller.signal }).catch((error) => {
+      settled = true;
+      return error;
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    const error = await result;
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The caller signal is the request's own: the context's signal stays live.
+    expect(ctx.signal.aborted).toBe(false);
+  });
+
   it('maps an HTML 404 and an HTML 400 to unknown_dataset', async () => {
     fetchMock.mockImplementationOnce(() => Promise.resolve(htmlResponse(404)));
     fetchMock.mockImplementationOnce(() => Promise.resolve(htmlResponse(400)));
@@ -220,6 +321,138 @@ describe('convenience fetchers', () => {
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.message).toBe('Disaster number is outside the valid FEMA range (1–32767).');
     expect(error.data).toMatchObject({ reason: 'invalid_filter', code: 'OF_OQP_002' });
+  });
+});
+
+describe('oversized and over-nested requests (#48)', () => {
+  /** A `substringof` filter whose `fetchDisasters({ filter, top: 1 })` URL is `length` characters. */
+  function filterOfUrlLength(length: number): string {
+    const filter = (n: number) => `substringof('${'a'.repeat(n)}',designatedArea)`;
+    const base = `${endpoint(DDS, 2)}%24inlinecount=allpages&%24filter=${encodeURIComponent(filter(0))}&%24top=1`;
+    return filter(length - base.length);
+  }
+
+  const orChain = (n: number) =>
+    Array.from({ length: n }, (_, i) => `disasterNumber eq ${4000 + i}`).join(' or ');
+
+  it.each([
+    [8_000, 'unknown_dataset'],
+    [8_001, 'request_too_long'],
+  ])('an HTML 400 for a %i-character URL → %s', async (length, reason) => {
+    fetchMock.mockImplementation(() => Promise.resolve(cdnBadRequestResponse()));
+    const error = await rejection(
+      svc.fetchDisasters({ filter: filterOfUrlLength(length), top: 1 }, createMockContext()),
+    );
+    expect(calledUrls(fetchMock).map((url) => url.length)).toEqual([length]);
+    expect(error.data).toMatchObject({ reason });
+  });
+
+  it('a URL past the CDN limit → request_too_long naming its length and the limit, not retried', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(cdnBadRequestResponse()));
+    const error = await rejection(
+      svc.fetchDisasters({ filter: filterOfUrlLength(15_138), top: 1 }, createMockContext()),
+    );
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toEqual({ reason: 'request_too_long', urlLength: 15_138 });
+    expect(error.message).toBe(
+      'OpenFEMA refused the request: its URL is 15,138 characters long, past the roughly 8,900 characters OpenFEMA accepts.',
+    );
+    expect(error.message).not.toMatch(/Bad Request|not found|catalog/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [8_001, '8,001', 'close to'],
+    [8_900, '8,900', 'close to'],
+    [8_901, '8,901', 'past'],
+  ])(
+    'a refused URL of %i characters is reported as %s characters, %s the roughly 8,900 accepted',
+    async (length, shown, relation) => {
+      fetchMock.mockImplementation(() => Promise.resolve(cdnBadRequestResponse()));
+      const error = await rejection(
+        svc.fetchDisasters({ filter: filterOfUrlLength(length), top: 1 }, createMockContext()),
+      );
+      expect(error.data).toEqual({ reason: 'request_too_long', urlLength: length });
+      expect(error.message).toBe(
+        `OpenFEMA refused the request: its URL is ${shown} characters long, ${relation} the roughly 8,900 characters OpenFEMA accepts.`,
+      );
+    },
+  );
+
+  it('a long URL to a catalog-listed dataset carries the request_too_long contract hint', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => cdnBadRequestResponse()],
+      ]),
+    );
+    const error = await rejection(
+      svc.fetchDataset(DDS, { filter: filterOfUrlLength(15_138), top: 1 }, queryCtx()),
+    );
+    expect(error.data).toMatchObject({
+      reason: 'request_too_long',
+      recovery: { hint: contractRecovery('request_too_long') },
+    });
+    expect(contractRecovery('request_too_long')).toMatch(/in \(/);
+  });
+
+  it('a listed dataset that answers a long URL with its 404 page is still dataset_not_served', async () => {
+    const dataset = 'PublicAssistanceProjectsStatus';
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(dataset, 1), () => htmlResponse(404)],
+      ]),
+    );
+    const error = await rejection(
+      svc.fetchDataset(dataset, { filter: 'x'.repeat(9_000), top: 1 }, queryCtx()),
+    );
+    expect(error.data).toMatchObject({ reason: 'dataset_not_served', dataset });
+  });
+
+  it('a filter past the nesting limit → filter_too_complex naming the limit, no upstream text', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalogResponse()],
+        [endpoint(DDS, 2), () => jsonResponse(400, ERROR_BODIES.filterTooDeep)],
+      ]),
+    );
+    const error = await rejection(svc.fetchDataset(DDS, { filter: orChain(100) }, queryCtx()));
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toEqual({
+      reason: 'filter_too_complex',
+      code: 'OF_OQP_000',
+      recovery: { hint: contractRecovery('filter_too_complex') },
+    });
+    expect(error.message).toBe(
+      'Invalid filter: the expression nests more than 100 levels deep, the most OpenFEMA allows. Every and/or adds a level, so a filter holds at most about 90 chained comparisons.',
+    );
+    expect(error.message).not.toMatch(/Query too complex|could not parse|quote/i);
+    expect(contractRecovery('filter_too_complex')).toMatch(/in \(/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('every convenience fetcher inherits filter_too_complex', async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(jsonResponse(400, ERROR_BODIES.filterTooDeep)),
+    );
+    const error = await rejection(
+      svc.fetchPaProjects({ filter: orChain(100) }, createMockContext()),
+    );
+    expect(error.data).toMatchObject({ reason: 'filter_too_complex', code: 'OF_OQP_000' });
+  });
+
+  it('an OF_OQP_000 with any other message keeps the parse-error classification', async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse(400, {
+          error: [{ ...ERROR_BODIES.filterTooDeep.error[0], message: 'Something else' }],
+        }),
+      ),
+    );
+    const error = await rejection(svc.fetchDisasters({ filter: 'x eq 1' }, createMockContext()));
+    expect(error.data).toMatchObject({ reason: 'invalid_filter' });
+    expect(error.message).toBe('Invalid filter: OpenFEMA could not parse the expression.');
   });
 });
 
@@ -488,7 +721,7 @@ describe('fetchDataset — catalog version resolution', () => {
     const urls = calledUrls(fetchMock);
     expect(urls).toHaveLength(2);
     expect(urls[0]).toBe(
-      'https://www.fema.gov/api/open/v1/OpenFemaDataSets?%24inlinecount=allpages&%24select=name%2Cversion%2CwebService&%24top=1000',
+      'https://www.fema.gov/api/open/v1/OpenFemaDataSets?%24inlinecount=allpages&%24select=name%2Cversion%2CwebService%2CdataDictionary&%24top=1000',
     );
     expect(urls[1]?.startsWith(endpoint(entity, version))).toBe(true);
   });
