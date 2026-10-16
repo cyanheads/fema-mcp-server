@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-16 · ⚠️ Breaking
+
+Row-returning tools bound each page at 100,000 characters and name the next page in next_offset; housing assistance gains county, ZIP, and inspection fields, name filters match case-insensitively, and the DataCanvas SQL gate rejects more functions (breaking).
+
 ## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-03
 
 Framework adoption brings clearer errors and telemetry controls, with corrected registry launch commands and portable production dependency installs.

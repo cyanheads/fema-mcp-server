@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 05:56:55
+Generated on: 2026-10-16 17:10:15
 
 ```text
 fema-mcp-server/
@@ -27,6 +27,7 @@ fema-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -120,6 +121,7 @@ fema-mcp-server/
 │       └── SKILL.md
 ├── scripts/
 │   ├── build-changelog.ts
+│   ├── build-name-vocabulary.ts
 │   ├── build.ts
 │   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
@@ -146,20 +148,24 @@ fema-mcp-server/
 │   │   │   └── definitions/
 │   │   │       └── fema-disaster.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── fema-dataframe-describe.tool.ts
-│   │           ├── fema-dataframe-drop.tool.ts
-│   │           ├── fema-dataframe-query.tool.ts
-│   │           ├── fema-get-disaster.tool.ts
-│   │           ├── fema-get-housing-assistance.tool.ts
-│   │           ├── fema-get-public-assistance.tool.ts
-│   │           ├── fema-query-dataset.tool.ts
-│   │           ├── fema-search-disasters.tool.ts
-│   │           └── fema-search-nfip.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── fema-dataframe-describe.tool.ts
+│   │       │   ├── fema-dataframe-drop.tool.ts
+│   │       │   ├── fema-dataframe-query.tool.ts
+│   │       │   ├── fema-get-disaster.tool.ts
+│   │       │   ├── fema-get-housing-assistance.tool.ts
+│   │       │   ├── fema-get-public-assistance.tool.ts
+│   │       │   ├── fema-query-dataset.tool.ts
+│   │       │   ├── fema-search-disasters.tool.ts
+│   │       │   └── fema-search-nfip.tool.ts
+│   │       ├── markdown-table.ts
+│   │       └── response-budget.ts
 │   ├── services/
 │   │   ├── canvas/
 │   │   │   └── canvas-accessor.ts
 │   │   └── openfema/
+│   │       ├── name-matcher.ts
+│   │       ├── name-vocabulary.ts
 │   │       ├── openfema-service.ts
 │   │       ├── types.ts
 │   │       └── us-states.ts
@@ -173,6 +179,7 @@ fema-mcp-server/
 │   ├── resources/
 │   │   └── fema-disaster.resource.test.ts
 │   ├── services/
+│   │   ├── name-matcher.test.ts
 │   │   └── openfema-service.test.ts
 │   └── tools/
 │       ├── canvas-engine-contract.test.ts
@@ -188,7 +195,9 @@ fema-mcp-server/
 │       ├── fema-search-disasters.tool.test.ts
 │       ├── fema-search-disasters.upstream.test.ts
 │       ├── fema-search-nfip.tool.test.ts
-│       └── fema-search-nfip.upstream.test.ts
+│       ├── fema-search-nfip.upstream.test.ts
+│       ├── markdown-table.test.ts
+│       └── response-budget.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
