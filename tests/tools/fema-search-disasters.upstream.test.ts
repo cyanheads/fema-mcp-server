@@ -16,8 +16,11 @@ import { initOpenFemaService } from '@/services/openfema/openfema-service.js';
 import {
   CATALOG_URL,
   calledUrls,
+  cdnBadRequestResponse,
+  ERROR_BODIES,
   endpoint,
   envelopeResponse,
+  jsonResponse,
   routeFetch,
 } from '../helpers/openfema-fixtures.js';
 
@@ -50,6 +53,7 @@ type SearchOutput = {
   truncated?: boolean;
   notice?: string;
   totalCount?: number;
+  next_offset?: number;
 };
 
 /** A declaration's area rows; IHP is flagged only on its last area, as sort order can put it last. */
@@ -172,15 +176,19 @@ describe('fema_search_disasters — under the 10,000-row window', () => {
       total_area_rows: 5,
       returned_count: 2,
       totalCount: 3,
+      next_offset: 2,
     });
     expect(out.declarations.map((d) => [d.disaster_number, d.designated_area_count])).toEqual([
       [4782, 3],
       [4781, 1],
     ]);
     expect(out).not.toHaveProperty('truncated');
-    expect(out).not.toHaveProperty('notice');
+    expect(out.notice).toBe(
+      'Returned 2 of the 3 matching declarations from offset 0, as many as limit allows; continue with offset 2.',
+    );
     expect(text).toContain('**2 of 3 unique declaration(s)** (from 5 designated-area rows)');
     expect(text).toContain('**3 total**');
+    expect(text).toContain('**Next offset:** 2');
     expect(text).not.toMatch(/lower bound|date_to/i);
 
     const urls = calledUrls(fetchMock);
@@ -221,6 +229,38 @@ describe('fema_search_disasters — under the 10,000-row window', () => {
     const result = await runToolContract(femaSearchDisasters, { offset: -1 });
     expect(result.isError).toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('sends a lowercase county as or-joined exact-case spellings in the request URL (#41)', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([[endpoint(DDS, 2), ddsServer(declarationRows(4332, '2017-08-25', 1))]]),
+    );
+    await search({ county: 'dekalb' });
+    // The second request reads the returned declaration's full area rows (#42).
+    expect(calledUrls(fetchMock)).toHaveLength(2);
+    const [url] = calledUrls(fetchMock);
+    const filter = new URL(url ?? '').searchParams.get('$filter');
+    expect(filter).toBe(
+      "(substringof('DeKalb', designatedArea) or substringof('dekalb', designatedArea) or substringof('DEKALB', designatedArea) or substringof('Dekalb', designatedArea))",
+    );
+  });
+
+  it('a county value that pushes the URL past the CDN limit → request_too_long with this tool’s hint (#48)', async () => {
+    fetchMock.mockImplementation(routeFetch([[endpoint(DDS, 2), () => cdnBadRequestResponse()]]));
+    const result = await runToolContract(femaSearchDisasters, { county: 'x'.repeat(3_000) });
+    expect(result.isError).toBe(true);
+    const error = (
+      result.structuredContent as {
+        error: { code: number; data: { reason: string; recovery: { hint: string } } };
+      }
+    ).error;
+    const declared = femaSearchDisasters.errors?.find((e) => e.reason === 'request_too_long');
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('request_too_long');
+    expect(error.data.recovery.hint).toBe(declared?.recovery);
+    expect(contentText(result)).toContain(declared?.recovery ?? '');
+    expect(contentText(result)).not.toMatch(/not found at OpenFEMA/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -364,5 +404,382 @@ describe('fema_search_disasters — past the 10,000-row window (#21)', () => {
     expect(out.truncated).toBe(true);
     expect(out.notice).not.toContain('past the end');
     expect(out.notice).toContain('date_to=2024-05-15');
+  });
+});
+
+describe('fema_search_disasters — county keeps declaration-level totals (#42)', () => {
+  type CountyRow = AreaRow & {
+    designatedArea: string;
+    fipsStateCode: string;
+    fipsCountyCode: string;
+  };
+  type MatchedArea = {
+    area: string;
+    fips_state_code?: string;
+    fips_county_code?: string;
+    ia_declared: boolean;
+    pa_declared: boolean;
+    hm_declared: boolean;
+  };
+  type CountyOutput = Omit<SearchOutput, 'declarations'> & {
+    declarations: Array<Declaration & { pa_declared: boolean; matched_areas?: MatchedArea[] }>;
+    area_totals_unavailable?: boolean;
+  };
+
+  /** `areas` rows for one declaration; area 0 is Bexar, PA/HM only, the rest carry IHP too. */
+  function withAreas(disasterNumber: number, day: string, areas: number): CountyRow[] {
+    return declarationRows(disasterNumber, day, areas).map((row, i) => ({
+      ...row,
+      designatedArea: i === 0 ? 'Bexar (County)' : `Area ${i} (County)`,
+      fipsStateCode: '48',
+      fipsCountyCode: String(29 + i).padStart(3, '0'),
+      ihProgramDeclared: i !== 0,
+      paProgramDeclared: true,
+      hmProgramDeclared: true,
+    }));
+  }
+
+  const isInList = (filter: string) => filter.startsWith('disasterNumber in (');
+  const filterOf = (url: string) => new URL(url).searchParams.get('$filter') ?? '';
+
+  /**
+   * DisasterDeclarationsSummaries over `all`: a `disasterNumber in (…)` filter selects those
+   * declarations' rows, in `id` order, paged by `$skip`/`$top`; any other filter is a county
+   * search, answered with the rows whose designatedArea holds "Bexar".
+   */
+  function countyServer(all: CountyRow[], onInList?: (url: string) => Response | undefined) {
+    return (url: string) => {
+      const filter = filterOf(url);
+      const top = Number(new URL(url).searchParams.get('$top'));
+      const skip = Number(new URL(url).searchParams.get('$skip') ?? 0);
+      if (isInList(filter)) {
+        const override = onInList?.(url);
+        if (override) return override;
+        const numbers = new Set(
+          (/\(([^)]*)\)/.exec(filter)?.[1] ?? '').split(',').map((n) => Number(n)),
+        );
+        const match = all.filter((r) => numbers.has(r.disasterNumber));
+        return envelopeResponse(DDS, match.slice(skip, skip + top), match.length);
+      }
+      const match = all.filter((r) => r.designatedArea.includes('Bexar'));
+      return envelopeResponse(DDS, match.slice(0, top), match.length);
+    };
+  }
+
+  async function countySearch(all: CountyRow[], input: Record<string, unknown>) {
+    fetchMock.mockImplementation(routeFetch([[endpoint(DDS, 2), countyServer(all)]]));
+    const result = await runToolContract(femaSearchDisasters, input);
+    expect(result.isError).not.toBe(true);
+    return { out: result.structuredContent as CountyOutput, text: contentText(result) };
+  }
+
+  it('reports the whole declaration’s area count and flags, and the matched areas beside them', async () => {
+    const all = [...withAreas(4332, '2017-08-25', 53), ...withAreas(4331, '2017-08-20', 5)];
+    const { out, text } = await countySearch(all, { county: 'Bexar' });
+    expect(out.total_area_rows).toBe(2);
+    expect(out.total_declarations).toBe(2);
+    expect(out.declarations.map((d) => [d.disaster_number, d.designated_area_count])).toEqual([
+      [4332, 53],
+      [4331, 5],
+    ]);
+    expect(out.declarations[0]).toMatchObject({ ia_declared: true, pa_declared: true });
+    expect(out.declarations[0]?.matched_areas).toEqual([
+      {
+        area: 'Bexar (County)',
+        fips_state_code: '48',
+        fips_county_code: '029',
+        ia_declared: false,
+        pa_declared: true,
+        hm_declared: true,
+      },
+    ]);
+    expect(out).not.toHaveProperty('area_totals_unavailable');
+    expect(text).toContain('**Designated Areas:** 53');
+    expect(text).toContain('**Matched Areas:** Bexar (County) (FIPS 48029) — PA, HM');
+
+    const urls = calledUrls(fetchMock);
+    expect(urls).toHaveLength(2);
+    expect(new URL(urls[0] ?? '').searchParams.get('$select')).toContain(
+      'designatedArea,fipsStateCode,fipsCountyCode',
+    );
+    const followUp = new URL(urls[1] ?? '');
+    expect(followUp.searchParams.get('$filter')).toBe('disasterNumber in (4332,4331)');
+    expect(followUp.searchParams.get('$select')).toBe(
+      'disasterNumber,ihProgramDeclared,paProgramDeclared,hmProgramDeclared',
+    );
+    expect(followUp.searchParams.get('$orderby')).toBe('id');
+    expect(followUp.searchParams.get('$top')).toBe('10000');
+  });
+
+  it('reads only the returned page’s declarations', async () => {
+    const all = [4335, 4334, 4333, 4332].flatMap((n, i) => withAreas(n, `2017-08-2${5 - i}`, 3));
+    const { out } = await countySearch(all, { county: 'Bexar', limit: 2, offset: 1 });
+    expect(out.declarations.map((d) => d.disaster_number)).toEqual([4334, 4333]);
+    expect(filterOf(calledUrls(fetchMock)[1] ?? '')).toBe('disasterNumber in (4334,4333)');
+    expect(out.total_declarations).toBe(4);
+  });
+
+  it('pages the full area rows past 10,000 and counts every one', async () => {
+    const all = [...withAreas(4800, '2024-06-01', 12_500), ...withAreas(4799, '2024-05-01', 7)];
+    const { out } = await countySearch(all, { county: 'Bexar' });
+    expect(out.declarations.map((d) => [d.disaster_number, d.designated_area_count])).toEqual([
+      [4800, 12_500],
+      [4799, 7],
+    ]);
+    const followUps = calledUrls(fetchMock).slice(1);
+    expect(followUps.map((u) => new URL(u).searchParams.get('$skip'))).toEqual(['0', '10000']);
+  });
+
+  it('reads the pages after the first together, at most 3 at a time', async () => {
+    const all = [
+      ...withAreas(4800, '2024-06-01', 32_324),
+      ...withAreas(4799, '2024-05-01', 20_000),
+    ];
+    const serve = countyServer(all);
+    let inFlight = 0;
+    const peaks: Array<[skip: string | null, inFlight: number]> = [];
+    fetchMock.mockImplementation(
+      routeFetch([
+        [
+          endpoint(DDS, 2),
+          async (url) => {
+            if (!isInList(filterOf(url))) return serve(url);
+            inFlight += 1;
+            peaks.push([new URL(url).searchParams.get('$skip'), inFlight]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            inFlight -= 1;
+            return serve(url);
+          },
+        ],
+      ]),
+    );
+    const result = await runToolContract(femaSearchDisasters, { county: 'Bexar' });
+    const out = result.structuredContent as CountyOutput;
+    expect(out.declarations.map((d) => [d.disaster_number, d.designated_area_count])).toEqual([
+      [4800, 32_324],
+      [4799, 20_000],
+    ]);
+    expect(peaks).toEqual([
+      ['0', 1],
+      ['10000', 1],
+      ['20000', 2],
+      ['30000', 3],
+      ['40000', 1],
+      ['50000', 2],
+    ]);
+  });
+
+  /** The page a limit-1000 county search returns: 1,000 declarations, one matched area each. */
+  function thousandDeclarations(first: number): CountyRow[] {
+    return Array.from({ length: 1000 }, (_, i) =>
+      withAreas(first - i, `2020-${String(1 + (i % 12)).padStart(2, '0')}-01`, 2),
+    )
+      .flat()
+      .sort((a, b) => b.declarationDate.localeCompare(a.declarationDate));
+  }
+
+  it('reads a full page of 1,000 four-digit disaster numbers in one request under the URL guard', async () => {
+    const { out } = await countySearch(thousandDeclarations(5678), {
+      county: 'Bexar',
+      limit: 1000,
+    });
+    // The 1,000 declarations' area rows are read before the response budget cuts the page.
+    expect(out.returned_count).toBeLessThan(1000);
+    expect(out.next_offset).toBe(out.returned_count);
+    expect(out.declarations.every((d) => d.designated_area_count === 2)).toBe(true);
+    const followUps = calledUrls(fetchMock).slice(1);
+    expect(followUps).toHaveLength(1);
+    expect((/\(([^)]*)\)/.exec(filterOf(followUps[0] ?? ''))?.[1] ?? '').split(',')).toHaveLength(
+      1000,
+    );
+    expect(followUps[0]?.length).toBeLessThan(8_000);
+  });
+
+  it('cuts the page at the response budget after the area totals are read, charging the corrected declarations', async () => {
+    /** 250 declarations of 100 areas each, one Bexar area apiece, titles `titleLength` long. */
+    const build = (titleLength: number) =>
+      Array.from({ length: 250 }, (_, i) =>
+        withAreas(4500 + i, '2020-06-01', 100).map((row) => ({
+          ...row,
+          declarationTitle: 'T'.padEnd(titleLength, 'x'),
+        })),
+      ).flat();
+    const probe = await countySearch(build(10).slice(0, 100), { county: 'Bexar' });
+    const probeLength = JSON.stringify(probe.out.declarations[0]).length;
+    /**
+     * Each corrected declaration then serializes to 499 characters and costs 501: 199 fit the
+     * 100,000-character budget and a 200th does not. Before the correction (area count 1,
+     * ia_declared false) each would serialize one character shorter and cost 500, so 200 would fit.
+     */
+    const { out } = await countySearch(build(10 + 499 - probeLength), {
+      county: 'Bexar',
+      limit: 1000,
+    });
+    expect(JSON.stringify(out.declarations[0]).length).toBe(499);
+    expect(out.returned_count).toBe(199);
+    expect(out.next_offset).toBe(199);
+    expect(out.total_declarations).toBe(250);
+    expect(out.declarations.every((d) => d.designated_area_count === 100 && d.ia_declared)).toBe(
+      true,
+    );
+    expect(out.notice).toBe(
+      'Returned 199 of the 250 matching declarations from offset 0, the most that fit the 100,000-character response budget; continue with offset 199.',
+    );
+  });
+
+  it('splits the disaster-number list across requests that each stay under the URL guard', async () => {
+    const { out } = await countySearch(thousandDeclarations(32_000), {
+      county: 'Bexar',
+      limit: 1000,
+    });
+    expect(out.declarations.every((d) => d.designated_area_count === 2)).toBe(true);
+    const followUps = calledUrls(fetchMock).slice(1);
+    expect(followUps).toHaveLength(2);
+    const numbers = followUps.flatMap((u) =>
+      (/\(([^)]*)\)/.exec(filterOf(u))?.[1] ?? '').split(','),
+    );
+    expect(new Set(numbers).size).toBe(1000);
+    expect(numbers).toHaveLength(1000);
+    for (const url of followUps) expect(url.length).toBeLessThan(8_000);
+  });
+
+  /** One declaration with two areas, Bexar first, per disaster number. */
+  const numbered = (numbers: number[]) =>
+    numbers.flatMap((n, i) => withAreas(n, `2020-${String(1 + (i % 12)).padStart(2, '0')}-01`, 2));
+  /** `fiveDigit` numbers from 10,000 up, then four-digit ones from 1,000 up: 1,000 in all. */
+  const mixedDigits = (fiveDigit: number) => [
+    ...Array.from({ length: fiveDigit }, (_, i) => 10_000 + i),
+    ...Array.from({ length: 1000 - fiveDigit }, (_, i) => 1000 + i),
+  ];
+
+  it.each([
+    [479, 1],
+    [480, 2],
+  ])(
+    'takes a disaster-number list of up to 7,500 encoded characters in one request (%i five-digit numbers → %i request(s))',
+    async (fiveDigit, requests) => {
+      const { out } = await countySearch(numbered(mixedDigits(fiveDigit)), {
+        county: 'Bexar',
+        limit: 1000,
+      });
+      expect(out.declarations.every((d) => d.designated_area_count === 2)).toBe(true);
+      const filters = calledUrls(fetchMock).slice(1).map(filterOf);
+      expect(filters).toHaveLength(requests);
+      const lengths = filters.map((f) => encodeURIComponent(f).length);
+      if (requests === 1) expect(lengths).toEqual([7_500]);
+      for (const length of lengths) expect(length).toBeLessThanOrEqual(7_500);
+    },
+  );
+
+  it.each([
+    [
+      'a later page of one list',
+      () => [...withAreas(4800, '2024-06-01', 12_500), ...withAreas(4799, '2024-05-01', 7)],
+      (url: string, inListCall: number) =>
+        inListCall > 1 && new URL(url).searchParams.get('$skip') === '10000',
+    ],
+    [
+      'the second of two lists',
+      () => thousandDeclarations(32_000),
+      (_url: string, inListCall: number) => inListCall === 2,
+    ],
+  ])(
+    'a failed request for %s keeps every declaration’s matched-area values, never a mix',
+    async (_, rows, fails) => {
+      let inListCalls = 0;
+      let failed = 0;
+      fetchMock.mockImplementation(
+        routeFetch([
+          [
+            endpoint(DDS, 2),
+            countyServer(rows(), (url) => {
+              if (!fails(url, ++inListCalls)) return;
+              failed += 1;
+              return jsonResponse(400, ERROR_BODIES.filterUnknownField);
+            }),
+          ],
+        ]),
+      );
+      const result = await runToolContract(femaSearchDisasters, { county: 'Bexar', limit: 1000 });
+      expect(result.isError).not.toBe(true);
+      expect(failed).toBe(1);
+      const out = result.structuredContent as CountyOutput;
+      expect(out.area_totals_unavailable).toBe(true);
+      for (const d of out.declarations) {
+        expect(d.designated_area_count).toBe(d.matched_areas?.length);
+        expect(d.ia_declared).toBe(false);
+      }
+    },
+  );
+
+  it('without county: one request, no matched_areas, unchanged totals', async () => {
+    const all = withAreas(4332, '2017-08-25', 53);
+    fetchMock.mockImplementation(
+      routeFetch([[endpoint(DDS, 2), () => envelopeResponse(DDS, all, all.length)]]),
+    );
+    const result = await runToolContract(femaSearchDisasters, { state: 'TX' });
+    const out = result.structuredContent as CountyOutput;
+    expect(out.declarations[0]).toMatchObject({ designated_area_count: 53, ia_declared: true });
+    expect(out.declarations[0]).not.toHaveProperty('matched_areas');
+    expect(contentText(result)).not.toContain('Matched Areas');
+    expect(calledUrls(fetchMock)).toHaveLength(1);
+    expect(new URL(calledUrls(fetchMock)[0] ?? '').searchParams.get('$select')).not.toContain(
+      'designatedArea',
+    );
+  });
+
+  it('an offset past the end reads no area rows', async () => {
+    const { out } = await countySearch(withAreas(4332, '2017-08-25', 3), {
+      county: 'Bexar',
+      offset: 5,
+    });
+    expect(out.returned_count).toBe(0);
+    expect(calledUrls(fetchMock)).toHaveLength(1);
+  });
+
+  it('a failed area-row request keeps the matched-area values and says so on both surfaces', async () => {
+    const all = withAreas(4332, '2017-08-25', 53);
+    fetchMock.mockImplementation(
+      routeFetch([
+        [
+          endpoint(DDS, 2),
+          countyServer(all, () => jsonResponse(400, ERROR_BODIES.filterUnknownField)),
+        ],
+      ]),
+    );
+    const result = await runToolContract(femaSearchDisasters, { county: 'Bexar' });
+    expect(result.isError).not.toBe(true);
+    const out = result.structuredContent as CountyOutput;
+    expect(out.area_totals_unavailable).toBe(true);
+    expect(out.declarations[0]).toMatchObject({ designated_area_count: 1, ia_declared: false });
+    expect(out.declarations[0]?.matched_areas).toHaveLength(1);
+    expect(out.notice).toMatch(/count only the areas county matched/);
+    expect(out.notice).toContain('fema_get_disaster');
+    expect(contentText(result)).toContain(out.notice ?? '');
+  });
+
+  it('a request cancelled during the area-row read ends as RequestCancelled, not a degraded result', async () => {
+    const all = withAreas(4332, '2017-08-25', 53);
+    const controller = new AbortController();
+    fetchMock.mockImplementation(
+      routeFetch([
+        [
+          endpoint(DDS, 2),
+          countyServer(all, () => {
+            controller.abort();
+            throw new DOMException('The operation was aborted.', 'AbortError');
+          }),
+        ],
+      ]),
+    );
+    const result = await runToolContract(
+      femaSearchDisasters,
+      { county: 'Bexar' },
+      { context: { signal: controller.signal } },
+    );
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { error: { code: number } }).error.code).toBe(
+      JsonRpcErrorCode.RequestCancelled,
+    );
   });
 });
