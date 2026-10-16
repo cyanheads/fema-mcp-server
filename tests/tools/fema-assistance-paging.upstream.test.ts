@@ -18,6 +18,7 @@ import { femaGetPublicAssistance } from '@/mcp-server/tools/definitions/fema-get
 import { initOpenFemaService } from '@/services/openfema/openfema-service.js';
 import {
   calledUrls,
+  cdnBadRequestResponse,
   endpoint,
   envelopeResponse,
   routeFetch,
@@ -155,11 +156,19 @@ describe('fema_get_housing_assistance — type × dataset-state matrix at offset
         new RegExp(`renter[^\\n]*\\b${renters === 'rows' ? 1 : 0} of ${rentersTotal}\\b`, 'i'),
       );
 
+      const notice = (structured.notice as string | undefined) ?? '';
+      if (anyRows) {
+        // A dataset with a row at offset 1100 holds more past it, so the page names the next offset.
+        expect(structured.next_offset).toBe(OFFSET + 1);
+        expect(notice).toContain(`continue with offset ${OFFSET + 1}.`);
+        expect(text).toContain(notice);
+      } else {
+        expect(structured).not.toHaveProperty('next_offset');
+      }
       if (pastEnd.length === 0) {
-        expect(structured).not.toHaveProperty('notice');
+        expect(notice).not.toContain('past the end');
         return;
       }
-      const notice = structured.notice as string;
       expect(notice).toContain(`Offset ${OFFSET}`);
       for (const { label, total: count } of pastEnd) {
         expect(notice).toContain(`${count} ${label} records`);
@@ -198,6 +207,26 @@ describe('fema_get_public_assistance — paging against OpenFEMA', () => {
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'no_results' },
     });
+  });
+
+  it('a county value that pushes the URL past the CDN limit → request_too_long with this tool’s hint (#48)', async () => {
+    fetchMock.mockImplementation(routeFetch([[endpoint(PA, 2), () => cdnBadRequestResponse()]]));
+    const result = await runToolContract(femaGetPublicAssistance, {
+      disaster_number: 4332,
+      county: 'x'.repeat(3_000),
+    });
+    expect(result.isError).toBe(true);
+    const declared = femaGetPublicAssistance.errors?.find((e) => e.reason === 'request_too_long');
+    expect(errorOf(result)).toEqual({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringMatching(/^OpenFEMA refused the request: its URL is [\d,]+ characters/),
+      data: {
+        reason: 'request_too_long',
+        urlLength: calledUrls(fetchMock)[0]?.length,
+        recovery: { hint: declared?.recovery },
+      },
+    });
+    expect(contentText(result)).toContain(declared?.recovery ?? '');
   });
 });
 
@@ -331,5 +360,131 @@ describe('zero amounts, as OpenFEMA reports them, reach both surfaces', () => {
       expect(description, field).not.toMatch(/absent/i);
       expect(description, field).toMatch(/\b0\b/);
     }
+  });
+});
+
+describe('fema_get_housing_assistance — county and zip_code filters against OpenFEMA (#47)', () => {
+  /** The decoded `$filter` of a request URL. */
+  function filterOf(url: string): string | null {
+    return new URL(url).searchParams.get('$filter');
+  }
+
+  it('sends the same filtered $filter to both datasets and reports each filtered $inlinecount', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [endpoint(OWNERS, 2), () => envelopeResponse(OWNERS, [housingRow(OWNERS)], 3)],
+        [endpoint(RENTERS, 2), () => envelopeResponse(RENTERS, [housingRow(RENTERS)], 6)],
+      ]),
+    );
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4332,
+      county: 'harris',
+      zip_code: '77084',
+      offset: 2,
+      limit: 1,
+    });
+    expect(result.isError).not.toBe(true);
+    const urls = calledUrls(fetchMock);
+    expect(urls.map((url) => new URL(url).pathname)).toEqual([
+      '/api/open/v2/HousingAssistanceOwners',
+      '/api/open/v2/HousingAssistanceRenters',
+    ]);
+    for (const url of urls) {
+      expect(filterOf(url)).toBe(
+        "disasterNumber eq 4332 and (substringof('Harris', county) or substringof('harris', county) or substringof('HARRIS', county)) and zipCode eq '77084'",
+      );
+      expect(new URL(url).searchParams.get('$skip')).toBe('2');
+      expect(new URL(url).searchParams.get('$top')).toBe('1');
+    }
+    expect(result.structuredContent).toMatchObject({
+      owners_count: 3,
+      renters_count: 6,
+      totalCount: 9,
+      county_filter: 'harris',
+      zip_code_filter: '77084',
+    });
+    const text = contentText(result);
+    expect(text).toContain('**Owner records:** 1 of 3');
+    expect(text).toContain('**Renter records:** 1 of 6');
+  });
+
+  it('applies the past-end notice to the filtered totals', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [endpoint(OWNERS, 2), () => envelopeResponse(OWNERS, [], 3)],
+        [endpoint(RENTERS, 2), () => envelopeResponse(RENTERS, [housingRow(RENTERS)], 6)],
+      ]),
+    );
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4332,
+      county: 'Harris',
+      zip_code: '77084',
+      offset: 5,
+    });
+    expect(result.isError).not.toBe(true);
+    expect((result.structuredContent as { notice: string }).notice).toBe(
+      'Offset 5 is past the end of the 3 owner records (last valid offset 2).',
+    );
+  });
+
+  it('a county value that pushes the URL past the CDN limit → request_too_long with this tool’s hint', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [endpoint(OWNERS, 2), () => cdnBadRequestResponse()],
+        [endpoint(RENTERS, 2), () => cdnBadRequestResponse()],
+      ]),
+    );
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4332,
+      county: 'x'.repeat(3_000),
+    });
+    expect(result.isError).toBe(true);
+    const declared = femaGetHousingAssistance.errors?.find((e) => e.reason === 'request_too_long');
+    const error = errorOf(result) as ErrorEnvelope & { data: { urlLength?: number } };
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'request_too_long', recovery: { hint: declared?.recovery } },
+    });
+    expect(calledUrls(fetchMock).map((url) => url.length)).toContain(error.data.urlLength);
+    expect(error.data.urlLength).toBeGreaterThan(8_000);
+    expect(contentText(result)).toContain(declared?.recovery ?? '');
+  });
+
+  it('keeps an uninspected owner row and a renter repair_replace_amount from live-shaped envelopes', async () => {
+    /** Live-shaped DR-4332 rows: an owner area nobody inspected, a renter with repair aid. */
+    const uninspected = {
+      ...housingRow(OWNERS),
+      totalInspected: 0,
+      averageFemaInspectedDamage: 0,
+      totalDamage: 0,
+      noFemaInspectedDamage: 0,
+    };
+    const renterWithRepair = {
+      ...housingRow(RENTERS),
+      repairReplaceAmount: 4_250.5,
+      totalInspected: 3,
+      totalInspectedWithNoDamage: 4,
+      totalWithModerateDamage: 2,
+      totalWithMajorDamage: 1,
+      totalWithSubstantialDamage: 0,
+    };
+    fetchMock.mockImplementation(
+      routeFetch([
+        [endpoint(OWNERS, 2), () => envelopeResponse(OWNERS, [uninspected], 1)],
+        [endpoint(RENTERS, 2), () => envelopeResponse(RENTERS, [renterWithRepair], 1)],
+      ]),
+    );
+    const result = await runToolContract(femaGetHousingAssistance, { disaster_number: 4332 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      owners: [{ total_inspected: 0, average_fema_inspected_damage: 0, total_damage: 0 }],
+      renters: [{ repair_replace_amount: 4_250.5, total_with_major_damage: 1 }],
+    });
+    const text = contentText(result);
+    expect(text).toContain(
+      '**Inspection:** none recorded (0 applicants inspected); damage unknown',
+    );
+    expect(text).not.toContain('**Average Inspected Damage:** $0');
+    expect(text).toContain('**Repair/Replacement:** $4,250.5');
   });
 });
