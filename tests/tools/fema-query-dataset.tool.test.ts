@@ -767,6 +767,20 @@ describe('fema_query_dataset — response budget and next_offset (#46)', () => {
     expect(recordsServed()).toBeLessThan(Math.ceil(fit * 1.2));
   });
 
+  it('names neither limit nor the budget when its reads end the page short of both', async () => {
+    // Narrow records after a wide first chunk: each read is sized from the wider average,
+    // so the page's three reads end well under the budget and under limit.
+    serveMatch(70_567, (i) => (i < READ_CHUNK ? wideRow(i, 100) : { id: i }));
+    const result = await runToolContract(femaQueryDataset, { dataset: DDS, limit: 10_000 });
+    const o = page(result);
+    expect(rowSurfaces(result).json).toBeLessThan(BUDGET);
+    expect(o.returned_count).toBeLessThan(10_000);
+    expect(o.next_offset).toBe(o.returned_count);
+    expect(o.notice).toBe(
+      `Returned ${o.returned_count} of the 70567 matching records from offset 0, short of both limit and the 100,000-character response budget; continue with offset ${o.returned_count}.`,
+    );
+  });
+
   it('pages narrow records read in several chunks by next_offset, every record exactly once', async () => {
     serveMatch(30_000, (i) => ({ id: i }));
     const seen: number[] = [];

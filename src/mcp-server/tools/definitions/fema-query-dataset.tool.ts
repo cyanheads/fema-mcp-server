@@ -311,6 +311,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
     const returned = rowsWithinBudget(rows.length, (i) => charge(rows[i] ?? {}));
     const page = rows.slice(0, returned);
     const nextOffset = input.offset + returned;
+    const budgetCut = returned < rows.length;
 
     const notice: string[] = [];
     if (page.length === 0) {
@@ -321,15 +322,17 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       );
     } else if (nextOffset < count) {
       ctx.enrich({ next_offset: nextOffset });
+      const share = `${returned} of the ${count} matching records`;
+      /**
+       * Neither bound ended a page whose reads stopped short: a failed read, or later rows
+       * narrower than the average the reads were sized from.
+       */
       notice.push(
-        readFailure && returned === rows.length
-          ? `Returned ${returned} of the ${count} matching records from offset ${input.offset}; OpenFEMA did not return the rest of this page, so continue with offset ${nextOffset}.`
-          : continuationNotice(
-              `${returned} of the ${count} matching records`,
-              input.offset,
-              nextOffset,
-              returned < input.limit,
-            ),
+        budgetCut || returned === input.limit
+          ? continuationNotice(share, input.offset, nextOffset, budgetCut)
+          : readFailure
+            ? `Returned ${share} from offset ${input.offset}; OpenFEMA did not return the rest of this page, so continue with offset ${nextOffset}.`
+            : `Returned ${share} from offset ${input.offset}, short of both limit and the 100,000-character response budget; continue with offset ${nextOffset}.`,
       );
       if (readFailure) {
         ctx.log.warning('A read past the first chunk of a dataset page failed', {
