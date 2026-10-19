@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-18
+
+Empty-search recovery and clearer county and declaration coverage.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-16 · ⚠️ Breaking
 
 Row-returning tools bound each page at 100,000 characters and name the next page in next_offset; housing assistance gains county, ZIP, and inspection fields, name filters match case-insensitively, and the DataCanvas SQL gate rejects more functions (breaking).

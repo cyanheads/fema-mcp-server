@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-10-16 17:10:15
+Generated on: 2026-10-19 01:50:36
 
 ```text
 fema-mcp-server/
@@ -180,6 +180,7 @@ fema-mcp-server/
 │   │   └── fema-disaster.resource.test.ts
 │   ├── services/
 │   │   ├── name-matcher.test.ts
+│   │   ├── name-vocabulary-build.test.ts
 │   │   └── openfema-service.test.ts
 │   └── tools/
 │       ├── canvas-engine-contract.test.ts
