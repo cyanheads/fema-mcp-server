@@ -368,7 +368,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       .string()
       .optional()
       .describe(
-        'Paging guidance: the offset to continue from and whether limit or the response budget ended the page, and, for a queried dataset whose end the offset is at or past, its total and last valid offset.',
+        'Zero-match guidance for supplied filters and declared programs, or paging guidance: the continuation offset and whether limit or the response budget ended the page, and each queried nonzero dataset’s total and last valid offset when past its end.',
       ),
     next_offset: z
       .number()
@@ -414,13 +414,6 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       when: 'The disaster number is above 32767, the highest number OpenFEMA holds, so no declaration exists.',
       recovery:
         'Verify the disaster number using fema_search_disasters. FEMA disaster numbers are typically 4-digit integers.',
-    },
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'No IA housing records found for this disaster and any state, county, or zip_code filter.',
-      recovery:
-        'IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.',
     },
     {
       reason: 'request_too_long',
@@ -488,27 +481,6 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       { label: 'renter', rows: rentersData.length, total: rentersCount },
     ].filter((d) => d.rows === 0 && d.total > 0);
 
-    if (ownersData.length === 0 && rentersData.length === 0 && pastEnd.length === 0) {
-      const area = [
-        county ? `county matching "${county}"` : undefined,
-        zipCode ? `ZIP ${zipCode}` : undefined,
-      ].filter(Boolean);
-      const message =
-        area.length > 0
-          ? `No IA housing records for disaster ${input.disaster_number} in ${area.join(' and ')}.`
-          : `No IA housing records for disaster ${input.disaster_number}.`;
-      throw ctx.fail('no_results', message, {
-        disasterNumber: input.disaster_number,
-        ...ctx.recoveryFor('no_results'),
-        recovery: {
-          hint:
-            area.length > 0
-              ? `No housing assistance records found for disaster ${input.disaster_number} in ${area.join(' and ')}. Check the county spelling and ZIP code, or drop them to see every area of the disaster.`
-              : `No housing assistance records found for disaster ${input.disaster_number}. IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.`,
-        },
-      });
-    }
-
     const mapArea = (r: RawHousingAssistance): AreaRecord => ({
       disaster_number: r.disasterNumber ?? input.disaster_number,
       ...(r.state ? { state: r.state } : {}),
@@ -572,6 +544,18 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     if (county) ctx.enrich({ county_filter: county });
     if (zipCode) ctx.enrich({ zip_code_filter: zipCode });
     const notice: string[] = [];
+    if (ownersCount + rentersCount === 0) {
+      const filters = [
+        input.state && 'state',
+        county && `county matching "${county}"`,
+        zipCode && `ZIP ${zipCode}`,
+      ].filter(Boolean);
+      notice.push(
+        `No IA housing records matched for disaster ${input.disaster_number}. ` +
+          (filters.length > 0 ? `Broaden the search by removing ${filters.join(' or ')}. ` : '') +
+          'Check the declaration’s IA program with fema_get_disaster; housing data may take weeks to appear.',
+      );
+    }
     if (pastEnd.length > 0) {
       const ends = pastEnd.map(
         (d) => `the ${d.total} ${d.label} records (last valid offset ${d.total - 1})`,

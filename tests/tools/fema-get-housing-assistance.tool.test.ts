@@ -103,14 +103,17 @@ describe('femaGetHousingAssistance', () => {
     expect(result.renters).toHaveLength(1);
   });
 
-  it('throws no_results when both datasets return empty', async () => {
+  it('returns zero totals when both datasets return empty', async () => {
     await setMock({
       fetchHousingAssistance: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
     });
     const ctx = createMockContext({ errors: femaGetHousingAssistance.errors });
     const input = femaGetHousingAssistance.input.parse({ disaster_number: 9999 });
-    await expect(femaGetHousingAssistance.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_results' },
+    await expect(femaGetHousingAssistance.handler(input, ctx)).resolves.toMatchObject({
+      owners: [],
+      renters: [],
+      owners_count: 0,
+      renters_count: 0,
     });
   });
 
@@ -255,20 +258,32 @@ describe('femaGetHousingAssistance — filters reaching OpenFEMA', () => {
 });
 
 describe('femaGetHousingAssistance — empty match', () => {
-  it('returns no_results with its contract code and recovery on both surfaces', async () => {
-    await setMock({
-      fetchHousingAssistance: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
-    });
-    const result = await runToolContract(femaGetHousingAssistance, { disaster_number: 9999 });
-    expect(result.isError).toBe(true);
-    const error = errorOf(result);
-    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data.reason).toBe('no_results');
-    expect(error.data.recovery?.hint).toBe(
-      'No housing assistance records found for disaster 9999. IA housing data may take weeks to appear after a declaration. Verify the disaster number via fema_get_disaster and try again later.',
-    );
-    expect(contentText(result)).toContain('No IA housing records for disaster 9999.');
-  });
+  it.each(['owners', 'renters', 'both'] as const)(
+    'returns empty %s success on both surfaces at any offset',
+    async (type) => {
+      await setMock({
+        fetchHousingAssistance: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+      });
+      for (const offset of [0, 50]) {
+        const result = await runToolContract(femaGetHousingAssistance, {
+          disaster_number: 9999,
+          type,
+          offset,
+        });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          owners: [],
+          renters: [],
+          owners_count: 0,
+          renters_count: 0,
+          notice: expect.stringContaining('fema_get_disaster'),
+        });
+        expect(contentText(result)).toContain('No IA housing records matched for disaster 9999.');
+        expect(contentText(result)).not.toMatch(/last valid offset|ZIP|county/);
+        expect(result.structuredContent).not.toHaveProperty('next_offset');
+      }
+    },
+  );
 
   it('format() renders the no-records line with both counts when both totals are zero', () => {
     const text = (
@@ -702,21 +717,18 @@ describe('femaGetHousingAssistance — county and zip_code filters (#47)', () =>
     expect(result.structuredContent).not.toHaveProperty('zip_code_filter');
   });
 
-  it('names the county and ZIP in no_results when the filters match nothing', async () => {
+  it('names the county and ZIP in the empty-match notice', async () => {
     fetchHousingAssistance.mockResolvedValue({ rows: [], count: 0 });
     const result = await runToolContract(femaGetHousingAssistance, {
       disaster_number: 4332,
       county: 'Harrisx',
       zip_code: '77084',
     });
-    const error = errorOf(result);
-    expect(error.data.reason).toBe('no_results');
-    expect(error.data.recovery?.hint).toBe(
-      'No housing assistance records found for disaster 4332 in county matching "Harrisx" and ZIP 77084. Check the county spelling and ZIP code, or drop them to see every area of the disaster.',
-    );
-    expect(contentText(result)).toContain(
-      'No IA housing records for disaster 4332 in county matching "Harrisx" and ZIP 77084.',
-    );
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      notice: expect.stringContaining('county matching "Harrisx" or ZIP 77084'),
+    });
+    expect(contentText(result)).toContain('county matching "Harrisx" or ZIP 77084');
   });
 
   it('declares request_too_long with the same code and recovery as fema_get_public_assistance', async () => {

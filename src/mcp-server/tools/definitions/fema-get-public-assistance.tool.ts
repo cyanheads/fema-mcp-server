@@ -207,7 +207,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       .string()
       .optional()
       .describe(
-        'Paging guidance: the offset to continue from and whether limit or the response budget ended the page, or, when offset is at or past the end, the total and the last valid offset.',
+        'Zero-match guidance for supplied filters and declared programs, or paging guidance: the continuation offset and whether limit or the response budget ended the page, or the last valid offset for a nonzero total.',
       ),
     next_offset: z
       .number()
@@ -246,13 +246,6 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       when: 'The disaster number is above 32767, the highest number OpenFEMA holds, so no declaration exists.',
       recovery:
         'Verify the disaster number using fema_search_disasters. FEMA disaster numbers are typically 4-digit integers.',
-    },
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'No PA project records found for the given filters.',
-      recovery:
-        'Verify the disaster has PA declared (pa_declared: true via fema_get_disaster) or check the state code. Recent disasters may have incomplete records.',
     },
     {
       reason: 'request_too_long',
@@ -307,15 +300,6 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       ctx,
     );
 
-    if (rows.length === 0 && count === 0) {
-      throw ctx.fail('no_results', 'No PA project records found.', {
-        ...ctx.recoveryFor('no_results'),
-        recovery: {
-          hint: 'No Public Assistance projects found for the given filters. Verify the disaster has PA declared (pa_declared: true via fema_get_disaster) or check the state code. Recent disasters may have incomplete records.',
-        },
-      });
-    }
-
     const fetched: Project[] = rows.map((r) => ({
       disaster_number: r.disasterNumber ?? 0,
       ...(r.pwNumber ? { pw_number: r.pwNumber } : {}),
@@ -342,7 +326,19 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     const nextOffset = input.offset + returned;
 
     ctx.enrich.total(count);
-    if (projects.length === 0) {
+    if (count === 0) {
+      const filters = [
+        input.county?.trim() && 'county',
+        input.state && input.disaster_number && 'state',
+      ].filter(Boolean);
+      ctx.enrich.notice(
+        'No PA projects matched the filters. ' +
+          (filters.length > 0 ? `Broaden the search by removing ${filters.join(' or ')}. ` : '') +
+          (input.disaster_number
+            ? 'Check the declaration’s PA program with fema_get_disaster; recent disasters may not yet have project records.'
+            : 'Try a different state, or search again later; project records may not yet be published.'),
+      );
+    } else if (projects.length === 0) {
       ctx.enrich.notice(
         `Offset ${input.offset} is past the end of the ${count} matching PA projects; the last valid offset is ${count - 1}.`,
       );

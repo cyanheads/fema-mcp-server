@@ -36,7 +36,7 @@ Federal disaster recovery data from FEMA: disaster declarations, public assistan
 | Tool | Description |
 |:---|:---|
 | `fema_search_disasters` | Search federal disaster declarations by state, incident type, declaration type, date range, and county |
-| `fema_get_disaster` | Fetch all designated-area records for a specific disaster by disaster number |
+| `fema_get_disaster` | Fetch up to 1,000 designated-area records for a specific disaster, with partial-coverage disclosure |
 | `fema_get_public_assistance` | Public assistance funded projects for a disaster or state — where federal recovery money went |
 | `fema_get_housing_assistance` | Individual assistance housing data for a disaster — owner and renter breakdowns and inspection counts by county/ZIP, filterable by county or ZIP |
 | `fema_search_nfip` | NFIP flood insurance claims for a state, county, or ZIP, with optional DataCanvas spillover for SQL analytics |
@@ -53,14 +53,14 @@ Federal disaster recovery data from FEMA: disaster declarations, public assistan
 |:---|:---|
 | `fema://disaster/{disasterNumber}` | Summary for a specific FEMA disaster declaration — title, state, incident type, programs, incident period |
 
-All resource data is also reachable via tools. Use `fema_get_disaster` for the same data with full designated-area detail.
+All resource data is also reachable via tools. Use `fema_get_disaster` for designated-area detail (up to 1,000 rows).
 
 ## Capability reference
 
 ### `fema_search_disasters` <sub>tool</sub>
 
 - Filters: `state`, `incident_type`, `declaration_type` (`DR`/`EM`/`FM`), inclusive `date_from`/`date_to` (`YYYY-MM-DD`), and `county`. `incident_type` and `county` are case-insensitive substring matches. Page with `limit` (1–1000, default 50) and `offset`; a page stops at 100,000 characters and `next_offset` says where to resume.
-- Returns one summary per disaster number with `designated_area_count`, program flags, and declaration totals. With `county`, `total_area_rows` and `matched_areas` (FIPS codes and per-area flags) show the matching areas. Errors: `invalid_state`, `invalid_range` (`date_from` after `date_to`), `no_results`, `request_too_long`.
+- Returns one summary per disaster number with `designated_area_count`, program flags, and declaration totals. With `county`, `total_area_rows` and `matched_areas` (FIPS codes and per-area flags) show the matching areas. Errors: `invalid_state`, `invalid_range` (`date_from` after `date_to`), `request_too_long`.
 - Searches the most recent 10,000 designated-area rows. When capped, results are marked `truncated`, totals are lower bounds, and `notice` names the next `date_to`.
 
 ---
@@ -68,28 +68,29 @@ All resource data is also reachable via tools. Use `fema_get_disaster` for the s
 ### `fema_get_disaster` <sub>tool</sub>
 
 - Requires `disaster_number` from `fema_search_disasters`.
-- Returns all designated-area records, FIPS codes, incident period, and program flags combined across areas; a missing disaster returns `not_found`.
+- Returns up to 1,000 designated-area records, FIPS codes, incident period, and program flags combined across fetched areas; a missing disaster returns `not_found`. When more rows exist, `areas_truncated`, `total_designated_area_count`, and `notice` disclose partial coverage. False flags do not exclude programs in unfetched rows; use `fema_query_dataset` for the full declaration.
 
 ---
 
 ### `fema_get_public_assistance` <sub>tool</sub>
 
 - Requires `disaster_number` or `state`; optional `county` (case-insensitive substring), `limit` (1–10000, default 100), and `offset`. A page stops at 100,000 characters; `next_offset` says where to resume.
-- Returns applicants, damage categories, project size/status, and federal and total obligations. Errors: `invalid_state`, `missing_filter`, `not_found`, `no_results`, `request_too_long`.
+- Returns applicants, damage categories, project size/status, and federal and total obligations. Errors: `invalid_state`, `missing_filter`, `not_found`, `request_too_long`.
 
 ---
 
 ### `fema_get_housing_assistance` <sub>tool</sub>
 
 - Requires `disaster_number`; optional `state`, `county` (case-insensitive substring), `zip_code` (5 digits), `type` (`owners`/`renters`/`both`, default `both`), `limit` (1–10000, default 100), and `offset`. A page stops at 100,000 characters; one `next_offset` continues both owners and renters.
-- Returns separate `owners` and `renters` arrays with county/ZIP registrations, approved amounts, and inspection counts, plus `owners_count`/`renters_count`. Owners also carry inspected damage in USD; renters carry damage-degree counts only. Errors: `invalid_state`, `not_found`, `no_results`, `request_too_long`.
+- Returns separate `owners` and `renters` arrays with county/ZIP registrations, approved amounts, and inspection counts, plus `owners_count`/`renters_count`. Owners also carry inspected damage in USD; renters carry damage-degree counts only. Errors: `invalid_state`, `not_found`, `request_too_long`.
 
 ---
 
 ### `fema_search_nfip` <sub>tool</sub>
 
 - Requires `state`; optional `county_code` (5-digit FIPS like `48201`, or a 3-digit code like `201` that gets the state prefix), `zip_code`, `year_from`/`year_to`, `limit` (1–10000, default 1000), and `offset`. Results come newest loss first.
-- Inline claims stop at 100,000 characters; `next_offset` and `notice` say how to continue. Errors: `invalid_state`, `invalid_county_code` (anything but 1–5 digits, or a short code for FM, MH, or PW), `invalid_range` (`year_from` after `year_to`), `no_results`.
+- Inline claims stop at 100,000 characters; `next_offset` and `notice` say how to continue. Errors: `invalid_state`, `invalid_county_code` (anything but 1–5 digits, or a short code for FM, MH, or PW), `invalid_range` (`year_from` after `year_to`).
+- County searches check for claims without a county code across the same state/year range, using one count-only exchange with no retries and a two-second deadline. The response uses the count only if ready with the primary page; otherwise it says coverage was not checked. These claims cannot be allocated to the selected county or ZIP. Removing `county_code` and optionally searching known ZIPs may help; ZIP results are not guaranteed complete or equivalent to a county.
 - With `CANVAS_PROVIDER_TYPE=duckdb`, a first-page match over the inline limit stages up to 50,000 rows. `canvas_id`, `canvas_table`, and `staged_count` identify the stage, `truncated: true` marks its cap, and `total_count` is the full match. Inspect it with `fema_dataframe_describe`, then query it with `fema_dataframe_query`.
 
 ---
@@ -127,7 +128,7 @@ All resource data is also reachable via tools. Use `fema_get_disaster` for the s
 ### `fema://disaster/{disasterNumber}` <sub>resource</sub>
 
 - Requires `disasterNumber` as a string of digits.
-- Returns title, state, incident type, declaration type/date, incident period, `programs_declared`, and `designated_area_count`; `not_found` carries recovery guidance pointing to `fema_search_disasters`.
+- Returns title, state, incident type, declaration type/date, incident period, `programs_declared`, and fetched `designated_area_count` (up to 500). When more rows exist, the summary includes `areas_truncated`, `total_designated_area_count`, and `notice`: programs describe only fetched rows, and an empty list does not establish absence. Use `fema_query_dataset` for full rows. `not_found` points to `fema_search_disasters`.
 
 ## Features
 
@@ -135,7 +136,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 OpenFEMA-specific:
 
-- Case-insensitive county and incident type filters, using a bundled snapshot of OpenFEMA names (refresh with `bun run vocabulary:build`)
+- Case-insensitive county and incident type filters, using bundled declaration names plus exact PA county spellings. Refresh with `bun run vocabulary:build`: sequential full exports read declarations in ID order and nonnull PA counties without a sort, with bounded transient retries. Each export must match its reported count; a failed or incomplete refresh leaves the snapshot unchanged.
 - `DisasterDeclarationsSummaries` rows collapse to one summary per declaration, with `designated_area_count`
 - `fema_search_nfip` requires `state`, which prevents unbounded 2.7M-row fetches
 - Large NFIP result sets spill into DuckDB tables you can query with SQL via DataCanvas
@@ -144,7 +145,8 @@ OpenFEMA-specific:
 Agent-friendly output:
 
 - Disaster number is the join key across tools, so calls chain without re-searching
-- Typed errors on every tool (`invalid_state`, `invalid_county_code`, `invalid_range`, `no_results`, `not_found`, `missing_filter`, `unknown_dataset`, `dataset_not_served`, `invalid_filter`, `invalid_select`, `invalid_orderby`, `invalid_odata_syntax`, `request_too_long`, `filter_too_complex`, `canvas_unavailable`), each with a recovery hint
+- Empty searches return empty arrays, zero totals, and a `notice` with guidance for supplied filters on both response surfaces; assistance calls can check declared programs with `fema_get_disaster`. Paging past a nonzero total has separate offset guidance.
+- Typed errors on every tool (`invalid_state`, `invalid_county_code`, `invalid_range`, `not_found`, `missing_filter`, `unknown_dataset`, `dataset_not_served`, `invalid_filter`, `invalid_select`, `invalid_orderby`, `invalid_odata_syntax`, `request_too_long`, `filter_too_complex`, `canvas_unavailable`), each with a recovery hint
 - `designated_area_count` on search results shows whether `fema_get_disaster` is worth a follow-up
 
 ## Getting started

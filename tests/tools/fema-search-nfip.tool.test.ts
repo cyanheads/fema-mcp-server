@@ -14,13 +14,13 @@ import {
   DuckdbProvider,
 } from '@cyanheads/mcp-ts-core/canvas';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { internalError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaSearchNfip } from '@/mcp-server/tools/definitions/fema-search-nfip.tool.js';
 import { setCanvas } from '@/services/canvas/canvas-accessor.js';
-import { initOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { getOpenFemaService, initOpenFemaService } from '@/services/openfema/openfema-service.js';
 import {
   calledUrls,
   ERROR_BODIES,
@@ -80,6 +80,8 @@ function nfipMatch(total: number, { failAtSkip, onPage, row = claim }: MatchOpti
     [
       NFIP_V3,
       (url) => {
+        if (param(url, 'select') === 'countyCode')
+          return envelopeResponse('NfipClaims', [], 0, 'v3');
         const skip = Number(param(url, 'skip') ?? 0);
         const top = Number(param(url, 'top'));
         onPage?.(skip);
@@ -170,6 +172,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   setCanvas(undefined);
@@ -179,6 +182,279 @@ afterEach(async () => {
 
 const search = (input: Record<string, unknown>, context = {}) =>
   runToolContract(femaSearchNfip, { state: 'TX', ...input } as never, { context });
+
+describe('fema_search_nfip — missing county coverage', () => {
+  it.each([
+    { total: 3, input: {}, expected: undefined },
+    { total: 1000, input: { limit: 2 }, expected: 'continue with offset 2' },
+    { total: 1000, input: { limit: 10000 }, expected: '100,000-character inline budget' },
+    { total: 3, input: { offset: 3 }, expected: 'last valid offset is 2' },
+  ])(
+    'composes positive coverage with a primary total $total and input $input',
+    async ({ total, input, expected }) => {
+      vi.useFakeTimers();
+      const primary = nfipMatch(total);
+      fetchMock.mockImplementation(async (url: string) => {
+        if (param(url, 'select') === 'countyCode')
+          return envelopeResponse('NfipClaims', [{ countyCode: null }], 7, 'v3');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return primary(url);
+      });
+      const pending = search({ county_code: '201', ...input });
+      await vi.advanceTimersByTimeAsync(5);
+      const result = await pending;
+      expect(result.isError).not.toBe(true);
+      expect(out(result).total_count).toBe(total);
+      expect(out(result).notice).toContain('7 claims in TX (all years)');
+      if (expected) expect(out(result).notice).toContain(expected);
+      expect(text(result)).toContain(out(result).notice);
+    },
+  );
+
+  it('returns the fastest primary immediately and aborts an unsettled coverage request without advancing its timeout', async () => {
+    vi.useFakeTimers();
+    let stopped = false;
+    fetchMock.mockImplementation((url: string, options: RequestInit) => {
+      if (param(url, 'select') !== 'countyCode')
+        return Promise.resolve(envelopeResponse('NfipClaims', [claim(0)], 1, 'v3'));
+      return new Promise((_resolve, reject) =>
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            stopped = true;
+            reject(options.signal?.reason);
+          },
+          { once: true },
+        ),
+      );
+    });
+    let settled = false;
+    const result = search({ county_code: '201', year_from: 2020 }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    expect(stopped).toBe(true);
+    const response = await result;
+    expect(response.isError).not.toBe(true);
+    expect(out(response).notice).toContain('TX (from 2020) was not checked');
+    expect(text(response)).toContain(out(response).notice);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([0, 'failure', 'missing'] as const)(
+    'treats count %s truthfully without failing the primary',
+    async (count) => {
+      vi.useFakeTimers();
+      fetchMock.mockImplementation(async (url: string) => {
+        if (param(url, 'select') === 'countyCode')
+          return count === 'failure'
+            ? new Response('down', { status: 503 })
+            : count === 'missing'
+              ? jsonResponse(200, { NfipClaims: [] })
+              : envelopeResponse('NfipClaims', [], count, 'v3');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return envelopeResponse('NfipClaims', [claim(0)], 1, 'v3');
+      });
+      const pending = search({ county_code: '201', year_to: 2022 });
+      await vi.advanceTimersByTimeAsync(5);
+      const result = await pending;
+      expect(result.isError).not.toBe(true);
+      if (count === 0) expect(out(result).notice).toBeUndefined();
+      else {
+        expect(out(result).notice).toContain('TX (through 2022) was not checked');
+        expect(text(result)).toContain(out(result).notice);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('cancels both primary and auxiliary I/O with the parent request', async () => {
+    const abort = new AbortController();
+    let stopped = 0;
+    fetchMock.mockImplementation(
+      (_url: string, options: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          options.signal?.addEventListener(
+            'abort',
+            () => {
+              stopped++;
+              reject(options.signal?.reason);
+            },
+            { once: true },
+          );
+        }),
+    );
+    const pending = search({ county_code: '201' }, { signal: abort.signal });
+    abort.abort();
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(text(result)).toMatch(/cancel|abort/i);
+    expect(stopped).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts auxiliary I/O when the primary fails', async () => {
+    let stopped = false;
+    fetchMock.mockImplementation((url: string, options: RequestInit) => {
+      if (param(url, 'select') !== 'countyCode')
+        return Promise.resolve(jsonResponse(400, ERROR_BODIES.filterUnknownField));
+      return new Promise((_resolve, reject) =>
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            stopped = true;
+            reject(options.signal?.reason);
+          },
+          { once: true },
+        ),
+      );
+    });
+    const result = await search({ county_code: '201' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_filter' } },
+    });
+    expect(text(result)).toContain('Invalid filter');
+    expect(stopped).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([new Error('coverage invariant failed'), internalError('coverage invariant failed')])(
+    'propagates auxiliary programmer fault %s and aborts the primary I/O',
+    async (error) => {
+      let stopped = false;
+      fetchMock.mockImplementation(
+        (_url: string, options: RequestInit) =>
+          new Promise((_resolve, reject) =>
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                stopped = true;
+                reject(options.signal?.reason);
+              },
+              { once: true },
+            ),
+          ),
+      );
+      vi.spyOn(getOpenFemaService(), 'countNfipMissingCounty').mockRejectedValue(error);
+      const result = await search({ county_code: '201' });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InternalError },
+      });
+      expect(stopped).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('aborts unfinished coverage before acquiring a canvas and does not later add its count', async () => {
+    const c = useCanvas();
+    let stopped = false;
+    const primary = nfipMatch(5000);
+    fetchMock.mockImplementation((url: string, options: RequestInit) => {
+      if (param(url, 'select') !== 'countyCode') return primary(url);
+      return new Promise((_resolve, reject) =>
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            stopped = true;
+            reject(options.signal?.reason);
+          },
+          { once: true },
+        ),
+      );
+    });
+    const acquire = c.acquire.bind(c);
+    vi.spyOn(c, 'acquire').mockImplementation(async (...args) => {
+      expect(stopped).toBe(true);
+      return acquire(...args);
+    });
+    const result = await search({ county_code: '201', limit: 5 });
+    expect(result.isError).not.toBe(true);
+    expect(out(result)).toMatchObject({ spilled: true, staged_count: 5000, total_count: 5000 });
+    expect(out(result).notice).toContain('Staged 5000');
+    expect(out(result).notice).toContain('was not checked');
+    expect(text(result)).toContain(out(result).notice);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('composes an already available state/year missing-county count with empty-match guidance on both surfaces', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (param(url, 'select') === 'countyCode') {
+        return envelopeResponse('NfipClaims', [{ countyCode: null }], 27, 'v3');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return envelopeResponse('NfipClaims', [], 0, 'v3');
+    });
+    const pending = search({
+      state: 'PR',
+      county_code: '127',
+      zip_code: '00901',
+      year_from: 2017,
+      year_to: 2020,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await pending;
+    expect(result.isError).not.toBe(true);
+    expect(out(result)).toMatchObject({
+      claims: [],
+      total_count: 0,
+      returned_count: 0,
+      spilled: false,
+    });
+    expect(out(result).notice).toContain('27 claims in PR');
+    expect(out(result).notice).toContain('2017–2020');
+    expect(out(result).notice).toContain('No NFIP claims matched');
+    expect(out(result).notice).toMatch(/ZIP.*complete/);
+    expect(text(result)).toContain(out(result).notice);
+    const aux = calledUrls(fetchMock).filter((url) => param(url, 'select') === 'countyCode');
+    expect(aux).toHaveLength(1);
+    expect(param(aux[0]!, 'filter')).toBe(
+      "state eq 'PR' and countyCode eq null and yearOfLoss ge 2017 and yearOfLoss le 2020",
+    );
+    expect(param(aux[0]!, 'top')).toBe('1');
+    expect(param(aux[0]!, 'inlinecount')).toBe('allpages');
+  });
+
+  it('does not reuse coverage or leave auxiliary work after repeated calls, including a late programmer fault', async () => {
+    const coverage = vi.spyOn(getOpenFemaService(), 'countNfipMissingCounty');
+    const late = Promise.withResolvers<number>();
+    coverage.mockResolvedValueOnce(17).mockImplementationOnce((_filter, _ctx, signal) => {
+      expect(signal.aborted).toBe(false);
+      signal.addEventListener('abort', () => late.reject(new Error('late coverage fault')), {
+        once: true,
+      });
+      return late.promise;
+    });
+    fetchMock.mockImplementation(nfipMatch(1));
+
+    const first = await search({ county_code: '201' });
+    expect(first.isError).not.toBe(true);
+    expect(out(first).notice).toContain('17 claims in TX');
+
+    const second = await search({ county_code: '201' });
+    expect(second.isError).not.toBe(true);
+    expect(out(second).notice).toContain('was not checked');
+    expect(out(second).notice).not.toContain('17 claims');
+    expect(coverage.mock.calls[1]?.[2].aborted).toBe(true);
+    await expect(late.promise).rejects.toThrow('late coverage fault');
+
+    const unfiltered = await search({});
+    expect(unfiltered.isError).not.toBe(true);
+    expect(out(unfiltered).notice).toBeUndefined();
+    expect(coverage).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(text(second)).toContain(out(second).notice);
+  });
+});
 
 describe('fema_search_nfip — request shape', () => {
   it('sends $select, $orderby=dateOfLoss desc,id, $skip=offset, and $top on the canvas-disabled request', async () => {
@@ -226,13 +502,13 @@ describe('fema_search_nfip — request shape', () => {
 });
 
 describe('fema_search_nfip — county_code forms and the year range (#45)', () => {
-  /** The `$filter` of the one request a successful search sends. */
+  /** The primary claim filter, excluding the optional county-coverage exchange. */
   async function filterSent(input: Record<string, unknown>): Promise<string | undefined> {
     fetchMock.mockImplementation(nfipMatch(3));
     const result = await search(input);
     expect(result.isError).not.toBe(true);
     const urls = calledUrls(fetchMock);
-    expect(urls).toHaveLength(1);
+    expect(urls).toHaveLength(String(input.county_code ?? '').trim() ? 2 : 1);
     return param(urls[0] ?? '', 'filter');
   }
 
@@ -337,35 +613,32 @@ describe('fema_search_nfip — county_code forms and the year range (#45)', () =
     );
   });
 
-  it('names the state mismatch in the no_results hint for a 5-digit code from another state', async () => {
+  it('names the state mismatch in the empty-match notice for a 5-digit code from another state', async () => {
     fetchMock.mockImplementation(nfipMatch(0));
     const result = await search({ county_code: '22071' });
     expect(param(calledUrls(fetchMock)[0] ?? '', 'filter')).toBe(
       "state eq 'TX' and countyCode eq '22071'",
     );
-    const error = errorOf(result);
-    expect(error).toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'no_results' },
-    });
-    expect(error.data.recovery.hint).toBe(
+    expect(result.isError).not.toBe(true);
+    expect(out(result).notice).toContain(
       'county_code 22071 belongs to LA (state FIPS 22), but state is TX (FIPS 48), and a claim must match both. Send the TX county code (48 followed by the 3-digit county FIPS, or the 3 digits alone), or set state to LA.',
     );
-    expect(text(result)).toContain(error.data.recovery.hint);
+    expect(text(result)).toContain(out(result).notice);
   });
 
-  it('names a prefix that is no state FIPS code in the no_results hint', async () => {
+  it('names a prefix that is no state FIPS code in the empty-match notice', async () => {
     fetchMock.mockImplementation(nfipMatch(0));
-    const { hint } = errorOf(await search({ county_code: '0201' })).data.recovery;
-    expect(hint).toBe(
+    const result = await search({ county_code: '0201' });
+    expect(out(result).notice).toContain(
       'county_code 00201 starts with 00, which is no state FIPS code; TX county codes start with 48. Send the TX county code (48 followed by the 3-digit county FIPS, or the 3 digits alone).',
     );
   });
 
-  it('keeps the declared no_results recovery when the county code matches the state', async () => {
+  it('suggests only supplied filters when the county code matches the state', async () => {
     fetchMock.mockImplementation(nfipMatch(0));
-    const { hint } = errorOf(await search({ county_code: '201' })).data.recovery;
-    expect(hint).toBe(femaSearchNfip.errors?.find((e) => e.reason === 'no_results')?.recovery);
+    const result = await search({ county_code: '201' });
+    expect(out(result).notice).toContain('removing or widening county_code');
+    expect(out(result).notice).not.toMatch(/zip_code|year range|invalid/);
   });
 
   it('returns the claim stored under another state’s county prefix', async () => {
@@ -515,14 +788,21 @@ describe('fema_search_nfip — canvas disabled', () => {
     expect(out(result).canvas_id).toBeUndefined();
   });
 
-  it('keeps no_results for an empty match, at any offset', async () => {
+  it('returns an empty success with guidance at any offset', async () => {
     fetchMock.mockImplementation(nfipMatch(0));
     for (const offset of [0, 50]) {
       const result = await search({ zip_code: '00000', offset });
-      expect(result.isError).toBe(true);
+      expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({
-        error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'no_results' } },
+        claims: [],
+        total_count: 0,
+        returned_count: 0,
+        spilled: false,
+        notice: expect.stringContaining('zip_code'),
       });
+      expect(text(result)).toContain(out(result).notice);
+      expect(out(result)).not.toHaveProperty('next_offset');
+      expect(text(result)).not.toContain('past the end');
     }
   });
 
@@ -550,7 +830,7 @@ describe('fema_search_nfip — canvas enabled, match fits the preview', () => {
     const next = 'Returned 2 of the 187 matching claims from offset 0; continue with offset 2.';
     expect(o.notice).toBe(next);
     expect(text(result)).toContain(next);
-    expect(calledUrls(fetchMock)).toHaveLength(1);
+    expect(calledUrls(fetchMock)).toHaveLength(2);
   });
 
   it('pages the match at offsets 0 and 100, every claim exactly once', async () => {
@@ -591,12 +871,17 @@ describe('fema_search_nfip — canvas enabled, match fits the preview', () => {
     expect(acquire).not.toHaveBeenCalled();
   });
 
-  it('reports no_results for an empty match without acquiring a canvas', async () => {
+  it('reports an empty success without acquiring a canvas', async () => {
     const c = useCanvas();
     const acquire = vi.spyOn(c, 'acquire');
     fetchMock.mockImplementation(nfipMatch(0));
     const result = await search({ zip_code: '00000' });
-    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'no_results' } } });
+    expect(result.structuredContent).toMatchObject({
+      claims: [],
+      total_count: 0,
+      spilled: false,
+      notice: expect.stringContaining('No NFIP claims matched'),
+    });
     expect(acquire).not.toHaveBeenCalled();
     expect(c.countForTenant(tenant())).toBe(0);
   });
@@ -840,8 +1125,14 @@ describe('fema_search_nfip — canvas enabled, match overflows the preview', () 
 
   it(`stages ${MAX_CANVAS_ROWS} rows of a larger match and reports the upstream total_count`, async () => {
     const c = useCanvas();
-    fetchMock.mockImplementation(nfipMatch(93_589));
-    const result = await search({ year_from: 2017, year_to: 2017, limit: 5 });
+    const primary = nfipMatch(93_589);
+    fetchMock.mockImplementation(async (url: string) => {
+      if (param(url, 'select') === 'countyCode')
+        return envelopeResponse('NfipClaims', [{ countyCode: null }], 7, 'v3');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return primary(url);
+    });
+    const result = await search({ county_code: '201', year_from: 2017, year_to: 2017, limit: 5 });
     const o = out(result);
     expect(o).toMatchObject({
       spilled: true,
@@ -856,9 +1147,16 @@ describe('fema_search_nfip — canvas enabled, match overflows the preview', () 
     expect(text(result)).toContain(
       `the table holds ${MAX_CANVAS_ROWS} of the 93589 matching claims`,
     );
+    expect(o.notice).toContain('7 claims in TX (2017–2017)');
+    expect(text(result)).toContain(o.notice);
     // Pages stop at the cap: nothing past row 50,000 is requested.
-    expect(calledUrls(fetchMock).map((u) => Number(param(u, 'skip')))).toEqual(
-      range(0, 10).map((p) => p * 5000),
+    expect(
+      calledUrls(fetchMock)
+        .filter((u) => param(u, 'select') !== 'countyCode')
+        .map((u) => Number(param(u, 'skip'))),
+    ).toEqual(range(0, 10).map((p) => p * 5000));
+    expect(calledUrls(fetchMock).filter((u) => param(u, 'select') === 'countyCode')).toHaveLength(
+      1,
     );
     const [table] = await (await c.acquire(o.canvas_id, tenant())).describe();
     expect(table?.rowCount).toBe(MAX_CANVAS_ROWS);
@@ -872,15 +1170,15 @@ describe('fema_search_nfip — notice matrix', () => {
     | 'past-end'
     | 'spill'
     | 'spill-capped'
-    | 'no_results'
+    | 'empty'
     | 'other error';
   const classify = (result: ContractResult): Kind => {
     if (result.isError) {
-      const { error } = result.structuredContent as { error: { data?: { reason?: string } } };
-      return error.data?.reason === 'no_results' ? 'no_results' : 'other error';
+      return 'other error';
     }
     const notice = out(result).notice;
     if (notice === undefined) return 'none';
+    if (notice.startsWith('No NFIP claims')) return 'empty';
     if (notice.startsWith('Offset ')) return 'past-end';
     if (notice.startsWith('Returned ')) return 'continuation';
     if (notice.includes('canvas cap was reached')) return 'spill-capped';
@@ -897,7 +1195,7 @@ describe('fema_search_nfip — notice matrix', () => {
   }
 
   const cells: Cell[] = [
-    { name: 'disabled · empty', canvas: false, total: 0, input: {}, kind: 'no_results' },
+    { name: 'disabled · empty', canvas: false, total: 0, input: {}, kind: 'empty' },
     { name: 'disabled · fits · 0', canvas: false, total: 187, input: {}, kind: 'none' },
     {
       name: 'disabled · fits · mid',
@@ -955,7 +1253,7 @@ describe('fema_search_nfip — notice matrix', () => {
       input: { limit: 50, canvas_id: 'Ab_012-xy9' },
       kind: 'continuation',
     },
-    { name: 'enabled · empty', canvas: true, total: 0, input: {}, kind: 'no_results' },
+    { name: 'enabled · empty', canvas: true, total: 0, input: {}, kind: 'empty' },
     { name: 'enabled · fits · 0', canvas: true, total: 187, input: {}, kind: 'none' },
     {
       name: 'enabled · fits · 0 · limit cut',

@@ -9,10 +9,11 @@
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 import { femaQueryDataset } from '@/mcp-server/tools/definitions/fema-query-dataset.tool.js';
-import { OpenFemaService } from '@/services/openfema/openfema-service.js';
+import { initOpenFemaService, OpenFemaService } from '@/services/openfema/openfema-service.js';
 import {
   CATALOG_ROWS,
   CATALOG_URL,
@@ -61,6 +62,203 @@ afterEach(() => {
 });
 
 describe('convenience fetchers', () => {
+  it.each([429, 503])('does not retry an auxiliary NFIP count after HTTP %s', async (status) => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(new Response('unavailable', { status }));
+    const result = rejection(
+      svc.countNfipMissingCounty(
+        "state eq 'TX' and countyCode eq null",
+        createMockContext(),
+        new AbortController().signal,
+      ),
+    );
+    await vi.runAllTimersAsync();
+    expect((await result).data?.status).toBe(status);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([{ NfipClaims: [] }, null, 5])(
+    'does not turn unusable auxiliary count metadata %j into zero coverage',
+    async (body) => {
+      fetchMock.mockResolvedValue(jsonResponse(200, body));
+      await expect(
+        svc.countNfipMissingCounty(
+          "state eq 'TX' and countyCode eq null",
+          createMockContext(),
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: expect.stringContaining('coverage count'),
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('bounds the auxiliary NFIP count response body at two seconds and stops its I/O', async () => {
+    vi.useFakeTimers();
+    let stopped = false;
+    fetchMock.mockImplementation((_url, options: RequestInit) =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{'));
+              options.signal?.addEventListener(
+                'abort',
+                () => {
+                  stopped = true;
+                  controller.error(options.signal?.reason);
+                },
+                { once: true },
+              );
+            },
+          }),
+        ),
+      ),
+    );
+    let settled = false;
+    const result = rejection(
+      svc.countNfipMissingCounty(
+        "state eq 'TX' and countyCode eq null",
+        createMockContext(),
+        new AbortController().signal,
+      ),
+    ).then((error) => {
+      settled = true;
+      return error;
+    });
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    expect(stopped).toBe(true);
+    expect(await result).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: expect.stringContaining('timed out'),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels auxiliary NFIP count I/O immediately on its supplied signal', async () => {
+    const abort = new AbortController();
+    let stopped = false;
+    fetchMock.mockImplementation(
+      (_url, options: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          options.signal?.addEventListener(
+            'abort',
+            () => {
+              stopped = true;
+              reject(options.signal?.reason);
+            },
+            { once: true },
+          );
+        }),
+    );
+    const result = rejection(
+      svc.countNfipMissingCounty(
+        "state eq 'TX' and countyCode eq null",
+        createMockContext(),
+        abort.signal,
+      ),
+    );
+    abort.abort();
+    expect(await result).toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+      message: expect.stringContaining('aborted'),
+    });
+    expect(stopped).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels the backoff after a 503 before the rotated attempt starts (#50)', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    fetchMock.mockImplementation(() => Promise.resolve(new Response('down', { status: 503 })));
+    initOpenFemaService({} as unknown as AppConfig, {} as unknown as StorageService);
+    const pending = runToolContract(
+      femaGetDisaster,
+      { disaster_number: 4781 },
+      { context: { signal: controller.signal } },
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(JSON.stringify(result.content)).toMatch(/cancel|abort/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([429, 'transport'] as const)(
+    'keeps the original URL on %s retries (#50)',
+    async (failure) => {
+      vi.useFakeTimers();
+      fetchMock.mockImplementationOnce(() =>
+        failure === 'transport'
+          ? Promise.reject(new TypeError('fetch failed'))
+          : Promise.resolve(new Response('rate limited', { status: failure })),
+      );
+      fetchMock.mockImplementation(() => Promise.resolve(envelopeResponse(DDS, [], 0)));
+      const pending = svc.fetchDisasters({ top: 1, skip: 0 }, createMockContext());
+      await vi.runAllTimersAsync();
+      expect(await pending).toEqual({ rows: [], count: 0 });
+      const urls = calledUrls(fetchMock);
+      expect(urls).toHaveLength(2);
+      expect(urls[1]).toBe(urls[0]);
+    },
+  );
+
+  it.each([{}, { top: 1, skip: 0 }])(
+    'exhausts persistent 503 within four attempts: %j (#50)',
+    async (opts) => {
+      vi.useFakeTimers();
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(new Response('unavailable', { status: 503 })),
+      );
+      const pending = rejection(svc.fetchDisasters(opts, createMockContext()));
+      await vi.runAllTimersAsync();
+      expect((await pending).data).toMatchObject({ status: 503, retryAttempts: 4 });
+      const urls = calledUrls(fetchMock);
+      expect(urls).toHaveLength(4);
+      if (Object.keys(opts).length === 0) expect(new Set(urls).size).toBe(1);
+      else expect(new Set(urls).size).toBe(3);
+    },
+  );
+
+  it('recovers from a URL-keyed 503 with identical encoded query parts (#50)', async () => {
+    vi.useFakeTimers();
+    let firstUrl: string | undefined;
+    fetchMock.mockImplementation((url: string) => {
+      firstUrl ??= url;
+      return Promise.resolve(
+        url === firstUrl
+          ? new Response('unavailable', { status: 503 })
+          : envelopeResponse(DDS, [{ disasterNumber: 4781 }], 9),
+      );
+    });
+    const pending = svc
+      .fetchDisasters({ filter: "state eq 'TX'", top: 5, skip: 10 }, createMockContext())
+      .catch((error) => error);
+    await vi.runAllTimersAsync();
+    expect(await pending).toEqual({ rows: [{ disasterNumber: 4781 }], count: 9 });
+    const urls = calledUrls(fetchMock);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toBe(
+      "https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries?%24inlinecount=allpages&%24filter=state%20eq%20'TX'&%24top=5&%24skip=10",
+    );
+    expect(urls[1]).not.toBe(urls[0]);
+    expect(urls.map((url) => url.split('?')[1]?.split('&').sort())).toEqual([
+      urls[0]?.split('?')[1]?.split('&').sort(),
+      urls[0]?.split('?')[1]?.split('&').sort(),
+    ]);
+  });
+
   it('composes a %24-encoded OData URL for the pinned entity and version', async () => {
     fetchMock.mockImplementation(
       routeFetch([[endpoint(DDS, 2), () => envelopeResponse(DDS, [{ disasterNumber: 4781 }], 9)]]),

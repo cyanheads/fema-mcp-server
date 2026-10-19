@@ -128,12 +128,11 @@ describe('fema_get_housing_assistance — type × dataset-state matrix at offset
       ];
 
       if (!anyRows && pastEnd.length === 0) {
-        expect(result.isError).toBe(true);
-        const error = errorOf(result);
-        expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-        expect(error.data.reason).toBe('no_results');
-        expect(error.data.recovery?.hint).toContain('IA housing data may take weeks to appear');
-        return;
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          notice: expect.stringContaining('housing data may take weeks to appear'),
+        });
+        expect(contentText(result)).toContain('fema_get_disaster');
       }
 
       expect(result.isError).not.toBe(true);
@@ -197,16 +196,19 @@ describe('fema_get_public_assistance — paging against OpenFEMA', () => {
     expect(contentText(result)).toContain(structured.notice as string);
   });
 
-  it('keeps no_results for a genuinely empty match', async () => {
+  it('returns empty success for a genuinely empty match', async () => {
     fetchMock.mockImplementation(
       routeFetch([[endpoint(PA, 2), () => envelopeResponse(PA, [], 0)]]),
     );
     const result = await runToolContract(femaGetPublicAssistance, { disaster_number: 9999 });
-    expect(result.isError).toBe(true);
-    expect(errorOf(result)).toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'no_results' },
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      projects: [],
+      total_count: 0,
+      returned_count: 0,
+      notice: expect.stringContaining('fema_get_disaster'),
     });
+    expect(contentText(result)).toContain('No PA projects matched');
   });
 
   it('a county value that pushes the URL past the CDN limit → request_too_long with this tool’s hint (#48)', async () => {

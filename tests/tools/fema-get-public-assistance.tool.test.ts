@@ -91,15 +91,19 @@ describe('femaGetPublicAssistance', () => {
     });
   });
 
-  it('throws no_results when query returns empty rows', async () => {
+  it('returns zero-match success with program guidance on both surfaces', async () => {
     await setMock({
       fetchPaProjects: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
     });
-    const ctx = createMockContext({ errors: femaGetPublicAssistance.errors });
-    const input = femaGetPublicAssistance.input.parse({ disaster_number: 9999 });
-    await expect(femaGetPublicAssistance.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_results' },
+    const result = await runToolContract(femaGetPublicAssistance, { disaster_number: 9999 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      projects: [],
+      total_count: 0,
+      returned_count: 0,
+      notice: expect.stringContaining('fema_get_disaster'),
     });
+    expect(contentText(result)).toContain('fema_get_disaster');
   });
 
   it('throws invalid_state for unknown state codes', async () => {
@@ -212,6 +216,18 @@ describe('femaGetPublicAssistance — filters reaching OpenFEMA', () => {
     );
   });
 
+  it.each(['LaSalle Parish', 'Chugach REAA'])(
+    'includes exact PA spelling for %s in every input case (#52)',
+    async (stored) => {
+      for (const county of [stored, stored.toLowerCase(), stored.toUpperCase()]) {
+        fetchPaProjects.mockClear();
+        expect(await filterSent({ state: 'LA', county })).toContain(
+          `substringof('${stored}', county)`,
+        );
+      }
+    },
+  );
+
   it.each([
     ['harris', 'Harris'],
     ['HARRIS', 'Harris'],
@@ -244,17 +260,29 @@ describe('femaGetPublicAssistance — filters reaching OpenFEMA', () => {
 });
 
 describe('femaGetPublicAssistance — empty match', () => {
-  it('returns no_results with its contract code and recovery on both surfaces', async () => {
+  it('keeps a state-only search scoped when suggesting a broader search', async () => {
     await setMock({ fetchPaProjects: vi.fn().mockResolvedValue({ rows: [], count: 0 }) });
-    const result = await runToolContract(femaGetPublicAssistance, { disaster_number: 9999 });
-    expect(result.isError).toBe(true);
-    const error = errorOf(result);
-    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data.reason).toBe('no_results');
-    expect(error.data.recovery?.hint).toBe(
-      'No Public Assistance projects found for the given filters. Verify the disaster has PA declared (pa_declared: true via fema_get_disaster) or check the state code. Recent disasters may have incomplete records.',
-    );
-    expect(contentText(result)).toContain('No PA project records found.');
+    const result = await runToolContract(femaGetPublicAssistance, { state: 'TX' });
+    expect(result.isError).not.toBe(true);
+    expect(contentText(result)).toContain('Try a different state');
+    expect(contentText(result)).not.toContain('removing state');
+  });
+  it.each([0, 50])('returns zero-match success at offset %s on both surfaces', async (offset) => {
+    await setMock({ fetchPaProjects: vi.fn().mockResolvedValue({ rows: [], count: 0 }) });
+    const result = await runToolContract(femaGetPublicAssistance, {
+      disaster_number: 9999,
+      offset,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      projects: [],
+      total_count: 0,
+      returned_count: 0,
+      notice: expect.stringContaining('fema_get_disaster'),
+    });
+    expect(contentText(result)).toContain('No PA projects matched');
+    expect(contentText(result)).not.toMatch(/last valid offset|county|state code/);
+    expect(result.structuredContent).not.toHaveProperty('next_offset');
   });
 });
 

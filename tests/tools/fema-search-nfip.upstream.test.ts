@@ -114,7 +114,8 @@ describe('fema_search_nfip — NfipClaims v3, canvas disabled', () => {
     );
 
     const urls = calledUrls(fetchMock);
-    expect(urls).toHaveLength(1);
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain('%24select=countyCode&%24top=1');
     expect(urls[0]).toBe(
       `https://www.fema.gov/api/open/v3/NfipClaims?%24inlinecount=allpages&%24filter=state%20eq%20'TX'%20and%20countyCode%20eq%20'48201'%20and%20yearOfLoss%20ge%202017&%24select=${SELECT}&%24orderby=dateOfLoss%20desc%2Cid&%24top=2&%24skip=0`,
     );
@@ -194,7 +195,9 @@ describe('fema_search_nfip — NfipClaims v3, DuckDB canvas', () => {
       expect(text).toContain(out.canvas_id);
       expect(text).toContain(out.canvas_table);
 
-      const urls = calledUrls(fetchMock);
+      const allUrls = calledUrls(fetchMock);
+      expect(allUrls.filter((url) => url.includes('%24select=countyCode&'))).toHaveLength(1);
+      const urls = allUrls.filter((url) => !url.includes('%24select=countyCode&'));
       expect(urls.map((u) => /%24skip=(\d+)/.exec(u)?.[1])).toEqual(['0', '5000']);
       for (const url of urls) {
         expect(url.startsWith(NFIP_V3)).toBe(true);

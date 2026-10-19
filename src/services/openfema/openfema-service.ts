@@ -46,8 +46,8 @@ export function escapeODataString(value: string): string {
   return value.replace(/'/g, "''");
 }
 
-/** Build encoded OData query string — uses %24 prefix for $ params (Akamai requirement). */
-function buildODataQuery(opts: OpenFemaQueryOptions): string {
+/** Build encoded OData query parts — uses %24 prefix for $ params (Akamai requirement). */
+function buildODataQueryParts(opts: OpenFemaQueryOptions): string[] {
   const parts: string[] = [];
   // Always request inline count so we get real totals
   parts.push('%24inlinecount=allpages');
@@ -56,7 +56,7 @@ function buildODataQuery(opts: OpenFemaQueryOptions): string {
   if (opts.orderby) parts.push(`%24orderby=${encodeURIComponent(opts.orderby)}`);
   if (opts.top !== undefined) parts.push(`%24top=${opts.top}`);
   if (opts.skip !== undefined) parts.push(`%24skip=${opts.skip}`);
-  return parts.join('&');
+  return parts;
 }
 
 /** Detect HTML response (Drupal 404 pages, the CDN's 400 page). */
@@ -413,8 +413,29 @@ export class OpenFemaService {
   }
 
   /** Fetch NFIP redacted claims (`NfipClaims` v3). */
-  fetchNfipClaims(opts: OpenFemaQueryOptions, ctx: Context): Promise<DatasetPage<RawNfipClaim>> {
-    return this.request<RawNfipClaim>('NfipClaims', 3, opts, ctx);
+  fetchNfipClaims(
+    opts: OpenFemaQueryOptions,
+    ctx: Context,
+    signal?: AbortSignal,
+  ): Promise<DatasetPage<RawNfipClaim>> {
+    return this.request<RawNfipClaim>('NfipClaims', 3, opts, ctx, notAtOpenFema, undefined, signal);
+  }
+
+  /** One count-only NFIP exchange, without retries, under a two-second body-inclusive deadline. */
+  async countNfipMissingCounty(filter: string, ctx: Context, signal: AbortSignal): Promise<number> {
+    const page = await this.exchange<RawNfipClaim>(
+      'NfipClaims',
+      3,
+      { filter, top: 1, select: 'countyCode' },
+      ctx,
+      {
+        signal: AbortSignal.any([ctx.signal, signal]),
+        timeoutMs: Math.min(2000, this.timeoutMs),
+        missing: notAtOpenFema,
+        requireCount: true,
+      },
+    );
+    return page.count;
   }
 
   /**
@@ -507,13 +528,26 @@ export class OpenFemaService {
     deadlineMs = this.timeoutMs,
     signal?: AbortSignal,
   ): Promise<DatasetPage<T>> {
+    const queryParts = buildODataQueryParts(opts);
     return withRetry(
-      ({ signal, remainingMs }) =>
-        this.exchange<T>(entity, version, opts, ctx, {
-          signal,
-          timeoutMs: Math.min(this.timeoutMs, remainingMs),
-          missing,
-        }),
+      async ({ signal, remainingMs }) => {
+        try {
+          return await this.exchange<T>(entity, version, opts, ctx, {
+            signal,
+            timeoutMs: Math.min(this.timeoutMs, remainingMs),
+            missing,
+            query: queryParts.join('&'),
+          });
+        } catch (error) {
+          const status = error instanceof McpError ? error.data?.status : undefined;
+          if (typeof status === 'number' && status >= 500 && status < 600) {
+            // Rotate encoded parts intact; only an HTTP server failure changes the URL.
+            const first = queryParts.shift();
+            if (first !== undefined) queryParts.push(first);
+          }
+          throw error;
+        }
+      },
       {
         operation: `OpenFemaService.request(${entity} v${version})`,
         context: ctx,
@@ -534,9 +568,17 @@ export class OpenFemaService {
       signal,
       timeoutMs,
       missing,
-    }: { signal?: AbortSignal; timeoutMs: number; missing: MissingEndpoint },
+      query = buildODataQueryParts(opts).join('&'),
+      requireCount = false,
+    }: {
+      signal?: AbortSignal;
+      timeoutMs: number;
+      missing: MissingEndpoint;
+      query?: string;
+      requireCount?: boolean;
+    },
   ): Promise<DatasetPage<T>> {
-    const url = `${this.apiRoot}/v${version}/${entity}?${buildODataQuery(opts)}`;
+    const url = `${this.apiRoot}/v${version}/${entity}?${query}`;
     let response: Response;
     try {
       response = await fetchWithTimeout(url, timeoutMs, ctx, {
@@ -590,6 +632,15 @@ export class OpenFemaService {
       });
     }
 
+    if (
+      requireCount &&
+      (!envelope ||
+        typeof envelope !== 'object' ||
+        !Number.isSafeInteger(envelope.metadata?.count) ||
+        (envelope.metadata?.count ?? -1) < 0)
+    ) {
+      throw serviceUnavailable('OpenFEMA did not return a usable NFIP coverage count.');
+    }
     // Data array is keyed by the entity name (e.g. "DisasterDeclarationsSummaries")
     const rows = (envelope[entity] as T[] | undefined) ?? [];
     // count is in envelope.metadata.count when $inlinecount=allpages is sent

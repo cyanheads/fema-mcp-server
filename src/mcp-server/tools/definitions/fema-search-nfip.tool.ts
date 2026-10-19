@@ -11,7 +11,7 @@ import {
   type SpilloverSpillResult,
   spillover,
 } from '@cyanheads/mcp-ts-core/canvas';
-import { internalError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { internalError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
 import type { RawNfipClaim } from '@/services/openfema/types.js';
@@ -102,7 +102,7 @@ const STATE_FIPS: Record<string, string> = {
 const STATE_BY_FIPS = new Map(Object.entries(STATE_FIPS).map(([state, fips]) => [fips, state]));
 
 /**
- * The no_results hint for a 5-digit county code whose state prefix disagrees with `state` —
+ * Empty-match guidance for a 5-digit county code whose state prefix disagrees with `state` —
  * NFIP holds a few such claims, so the code is still sent, and the mismatch is named only
  * when it matched nothing. Undefined when the prefix agrees or `state` has no FIPS code.
  */
@@ -410,7 +410,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .string()
       .optional()
       .describe(
-        'Paging and canvas guidance: the offset to continue from when claims were left out, the last valid offset when offset is past the end, or the canvas table and dataframe tools after a spill.',
+        'Zero-match, paging, and canvas guidance, composed with county-coverage disclosure: a state/year count of claims without county codes when already available, or an unchecked-coverage notice; this count does not identify any county or ZIP.',
       ),
     next_offset: z
       .number()
@@ -443,13 +443,6 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       when: 'year_from is later than year_to, so no claim could match.',
       recovery:
         'Swap year_from and year_to so year_from is the earlier year; equal years select a single year.',
-    },
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'Query returned zero matching NFIP claims.',
-      recovery:
-        'Broaden the search by removing county_code, zip_code, or year filters, or verify the state code is correct.',
     },
   ],
 
@@ -518,26 +511,76 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     // has, so answering it with a fresh drain and canvas would re-stage the match on every page.
     const canvas = offset === 0 ? getCanvas() : undefined;
 
-    // With a canvas, the first page is fetched whole: it decides whether the match fits the
-    // inline budget before any canvas is acquired. Without one, only the requested page is
-    // fetched, no larger than the rows that could fit the budget.
-    const first = await svc.fetchNfipClaims(
-      canvas
-        ? { ...query, top: PAGE_SIZE, skip: 0 }
-        : { ...query, top: Math.min(limit, MAX_BUDGET_ROWS), skip: offset },
-      ctx,
+    // Snapshot coverage at primary readiness, before any canvas acquisition or drain.
+    const auxiliary = new AbortController();
+    let missingCountyCount: number | undefined;
+    const fatal = Promise.withResolvers<never>();
+    const primaryAbort = new AbortController();
+    // Start the primary first; the auxiliary still runs concurrently with its HTTP read.
+    const primary = svc
+      .fetchNfipClaims(
+        canvas
+          ? { ...query, top: PAGE_SIZE, skip: 0 }
+          : { ...query, top: Math.min(limit, MAX_BUDGET_ROWS), skip: offset },
+        ctx,
+        primaryAbort.signal,
+      )
+      .then((first) => {
+        const count = missingCountyCount;
+        auxiliary.abort();
+        return { first, count };
+      });
+    if (countyCode) {
+      const coverageFilter = [`state eq '${escapeODataString(input.state)}'`, 'countyCode eq null'];
+      if (input.year_from != null) coverageFilter.push(`yearOfLoss ge ${input.year_from}`);
+      if (input.year_to != null) coverageFilter.push(`yearOfLoss le ${input.year_to}`);
+      void svc.countNfipMissingCounty(coverageFilter.join(' and '), ctx, auxiliary.signal).then(
+        (count) => {
+          missingCountyCount = count;
+        },
+        (error: unknown) => {
+          // Only operational service failures are best effort; programmer faults still fail.
+          if (!(error instanceof McpError) || error.code === JsonRpcErrorCode.InternalError)
+            fatal.reject(error);
+        },
+      );
+    }
+
+    const { first, count: coverageCount } = await Promise.race([primary, fatal.promise]).finally(
+      () => {
+        auxiliary.abort();
+        primaryAbort.abort();
+      },
     );
+    ctx.signal.throwIfAborted();
+    const coverageScope = `${input.state} (${input.year_from != null && input.year_to != null ? `${input.year_from}–${input.year_to}` : input.year_from != null ? `from ${input.year_from}` : input.year_to != null ? `through ${input.year_to}` : 'all years'})`;
+    const coverage =
+      !countyCode || coverageCount === 0
+        ? ''
+        : coverageCount === undefined
+          ? `Missing-county coverage for ${coverageScope} was not checked; claims without countyCode cannot match county_code.`
+          : `${coverageCount.toLocaleString('en-US')} claims in ${coverageScope} have no countyCode and cannot match county_code. This state/year count does not identify their county or ZIP. Remove county_code to include them, optionally searching known ZIPs; ZIP results are not guaranteed complete or equivalent to the county.`;
+    const notice = (message: string) =>
+      ctx.enrich.notice([message, coverage].filter(Boolean).join(' '));
     const total = first.count;
     if (total === 0) {
       const mismatch = countyCode && stateMismatchHint(countyCode, input.state);
-      throw ctx.fail(
-        'no_results',
-        `No NFIP claims matched the filters for ${input.state}.`,
-        mismatch ? { recovery: { hint: mismatch } } : ctx.recoveryFor('no_results'),
+      const filters = [
+        countyCode && 'county_code',
+        input.zip_code?.trim() && 'zip_code',
+        (input.year_from != null || input.year_to != null) && 'year range',
+      ].filter(Boolean);
+      notice(
+        `No NFIP claims matched the filters for ${input.state}. ` +
+          (filters.length > 0
+            ? `Broaden the search by removing or widening ${filters.join(', ')}.`
+            : 'Try a different state or search again later.') +
+          (mismatch ? ` ${mismatch}` : ''),
       );
+      return { claims: [], total_count: 0, returned_count: 0, spilled: false };
     }
     if (offset >= total) {
-      ctx.enrich.notice(
+      notice(
         `Offset ${offset} is past the end of the ${total} matching claims; the last valid offset is ${total - 1}.`,
       );
       return { claims: [], total_count: total, returned_count: 0, spilled: false };
@@ -552,10 +595,10 @@ export const femaSearchNfip = tool('fema_search_nfip', {
         ctx.enrich({ next_offset: next });
         const budget =
           rows.length < limit ? ', the most that fit the 100,000-character inline budget' : '';
-        ctx.enrich.notice(
+        notice(
           `Returned ${rows.length} of the ${total} matching claims from offset ${offset}${budget}; continue with offset ${next}.`,
         );
-      }
+      } else if (coverage) notice('');
       ctx.log.info('NFIP claims returned inline', { total, offset, returned: rows.length });
       return {
         claims: toOutputRows(rows),
@@ -630,7 +673,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     // A spill happens at offset 0 only, and only for a match larger than its preview.
     if (claims.length < total) ctx.enrich({ next_offset: claims.length });
     const where = `table "${handle.tableName}" (canvas_id "${instance.canvasId}")`;
-    ctx.enrich.notice(
+    notice(
       (truncated
         ? `Canvas ${where} holds the first ${staged} of the ${total} matching claims: the 50,000-row canvas cap was reached. Narrow county_code, zip_code, or the year range to stage the whole match. `
         : `Staged ${staged} matching claims on canvas ${where}. `) +
@@ -675,7 +718,11 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       );
     }
     if (result.claims.length === 0) {
-      lines.push('_This page is empty: the offset is past the end of the matching claims._');
+      lines.push(
+        result.total_count === 0
+          ? '_No NFIP claims matched the filters._'
+          : '_This page is empty: the offset is past the end of the matching claims._',
+      );
     }
     for (const c of result.claims) {
       const parts: string[] = [];

@@ -14,10 +14,29 @@ import {
 import {
   DESIGNATED_AREAS,
   INCIDENT_TYPES,
+  PA_COUNTIES,
   VOCABULARY_AS_OF,
 } from '@/services/openfema/name-vocabulary.js';
 
+const countyVocabulary = [
+  ...new Set([
+    ...PA_COUNTIES,
+    ...DESIGNATED_AREAS.flatMap((area) => {
+      const typed = /^(.+) \((County|Parish|Borough|Census Area)\)$/.exec(area);
+      return typed ? [area, `${typed[1]} ${typed[2]}`] : [area];
+    }),
+  ]),
+];
+
 describe('countySpellings', () => {
+  it.each(['LaSalle Parish', 'Chugach REAA'])(
+    'resolves PA-specific stored spelling %s in every case (#52)',
+    (stored) => {
+      for (const input of [stored, stored.toLowerCase(), stored.toUpperCase()]) {
+        expect(countySpellings(input)).toContain(stored);
+      }
+    },
+  );
   it.each([
     ['harris', ['Harris', 'harris', 'HARRIS']],
     ['HARRIS', ['Harris', 'HARRIS', 'harris']],
@@ -53,8 +72,8 @@ describe('countySpellings', () => {
    * PA's `county` stores `DeKalb County`, `St. John the Baptist Parish`, and `St. Louis, City of`
    * where `designatedArea` stores `DeKalb (County)`, `St. John the Baptist (Parish)`, and
    * `St. Louis`. The `<name> <type>` forms resolve from the snapshot and lead the list; the
-   * `, City of` and `, Municipality of` forms, and `Valdez–Cordova` with the en dash PA stores
-   * (`designatedArea` has a hyphen), have no snapshot form and are reached by the Title Case variant.
+   * `, City of` / `, Municipality of` and en-dash `Valdez–Cordova` forms resolve directly
+   * from the PA snapshot, alongside the declaration-derived forms.
    */
   it.each([
     ['dekalb county', ['DeKalb County', 'dekalb county', 'DEKALB COUNTY', 'Dekalb County']],
@@ -68,14 +87,14 @@ describe('countySpellings', () => {
       'st. john the baptist parish',
       ['St. John the Baptist Parish', 'st. john the baptist parish', 'ST. JOHN THE BAPTIST PARISH'],
     ],
-    ['st. louis, city of', ['st. louis, city of', 'ST. LOUIS, CITY OF', 'St. Louis, City of']],
+    ['st. louis, city of', ['St. Louis, City of', 'st. louis, city of', 'ST. LOUIS, CITY OF']],
     [
       'anchorage, municipality of',
-      ['anchorage, municipality of', 'ANCHORAGE, MUNICIPALITY OF', 'Anchorage, Municipality of'],
+      ['Anchorage, Municipality of', 'anchorage, municipality of', 'ANCHORAGE, MUNICIPALITY OF'],
     ],
     [
       'valdez–cordova census area',
-      ['valdez–cordova census area', 'VALDEZ–CORDOVA CENSUS AREA', 'Valdez–Cordova Census Area'],
+      ['Valdez–Cordova Census Area', 'valdez–cordova census area', 'VALDEZ–CORDOVA CENSUS AREA'],
     ],
   ])('resolves the PA county form %j to %j', (input, expected) => {
     expect(countySpellings(input)).toEqual(expected);
@@ -140,6 +159,7 @@ describe('name vocabulary snapshot', () => {
   it.each([
     ['DESIGNATED_AREAS', DESIGNATED_AREAS],
     ['INCIDENT_TYPES', INCIDENT_TYPES],
+    ['PA_COUNTIES', PA_COUNTIES],
   ])('%s is sorted, distinct, non-blank, and keeps its length when lowercased', (_, values) => {
     expect(values.length).toBeGreaterThan(0);
     expect(new Set(values).size).toBe(values.length);
@@ -186,7 +206,7 @@ describe('worst case over every input', () => {
    * 6 incident-type spellings.
    */
   it('the snapshot holds at most 4 stored forms of any county substring and 2 of any incident-type substring', () => {
-    expect(mostStoredForms(DESIGNATED_AREAS)).toBe(4); // "ap": ap, Ap, aP, AP
+    expect(mostStoredForms(countyVocabulary)).toBe(4); // "ap": ap, Ap, aP, AP
     expect(mostStoredForms(INCIDENT_TYPES)).toBe(2); // "b": B, b
   });
 
@@ -195,9 +215,20 @@ describe('worst case over every input', () => {
       Math.max(
         ...inputs.flatMap((input) => [input, input.toUpperCase()]).map((i) => spell(i).length),
       );
-    expect(most(countySpellings, shortInputs(DESIGNATED_AREAS))).toBe(4);
+    expect(most(countySpellings, shortInputs(countyVocabulary))).toBe(4);
     expect(most(incidentTypeSpellings, shortInputs(INCIDENT_TYPES))).toBe(3);
   });
+});
+
+it('reaches every combined stored county name in every case without changing substring semantics (#52)', () => {
+  for (const stored of countyVocabulary) {
+    for (const input of [stored, stored.toLowerCase(), stored.toUpperCase()]) {
+      expect(countySpellings(input).some((spelling) => stored.includes(spelling))).toBe(true);
+    }
+  }
+  const spellings = countySpellings('harris');
+  expect(spellings.some((spelling) => 'Harris County'.includes(spelling))).toBe(true);
+  expect(spellings.some((spelling) => 'Harrison County'.includes(spelling))).toBe(true);
 });
 
 /** Thread CPU milliseconds for `fn`, the least of three runs. */

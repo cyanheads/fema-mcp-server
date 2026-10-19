@@ -214,15 +214,18 @@ describe('fema_search_disasters — under the 10,000-row window', () => {
     expect(text).toContain('**2 of 2 unique declaration(s)**');
   });
 
-  it('an empty match is still no_results', async () => {
+  it('an empty match returns success with a zero total and filter guidance', async () => {
     fetchMock.mockImplementation(routeFetch([[endpoint(DDS, 2), ddsServer([])]]));
     const result = await runToolContract(femaSearchDisasters, { state: 'WY' });
-    expect(result.isError).toBe(true);
-    const error = (
-      result.structuredContent as { error: { code: number; data: { reason: string } } }
-    ).error;
-    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data.reason).toBe('no_results');
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      declarations: [],
+      total_declarations: 0,
+      total_area_rows: 0,
+      returned_count: 0,
+      notice: expect.stringContaining('No disaster declarations matched'),
+    });
+    expect(contentText(result)).toContain('removing or widening state');
   });
 
   it('invalid input is rejected before any request', async () => {

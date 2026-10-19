@@ -3,7 +3,8 @@
  * @module tests/tools/fema-get-disaster.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 
@@ -45,6 +46,80 @@ function makeAreaRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('femaGetDisaster', () => {
+  it.each([9999, 32768])(
+    'retains not_found code and recovery on both surfaces for %s (#54)',
+    async (disaster_number) => {
+      const fetchDisasters = vi.fn().mockResolvedValue({ rows: [], count: 0 });
+      await setMock({ fetchDisasters });
+      const result = await runToolContract(femaGetDisaster, { disaster_number });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.NotFound,
+          data: {
+            reason: 'not_found',
+            recovery: { hint: expect.stringContaining('fema_search_disasters') },
+          },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('fema_search_disasters');
+      expect(fetchDisasters).toHaveBeenCalledTimes(disaster_number > 32767 ? 0 : 1);
+    },
+  );
+
+  it.each([2, 1000])('keeps complete declarations unchanged at %s rows (#54)', async (count) => {
+    const fetchDisasters = vi
+      .fn()
+      .mockResolvedValue({ rows: Array.from({ length: count }, () => makeAreaRow()), count });
+    await setMock({ fetchDisasters });
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4781 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      designated_area_count: count,
+      ia_declared: true,
+      pa_declared: true,
+    });
+    for (const key of ['areas_truncated', 'total_designated_area_count', 'notice'])
+      expect(result.structuredContent).not.toHaveProperty(key);
+    expect(fetchDisasters).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'discloses partial area and program evidence on both surfaces: %s (#54)',
+    async (positive) => {
+      const fetchDisasters = vi.fn().mockResolvedValue({
+        rows: Array.from({ length: 1000 }, () =>
+          makeAreaRow({
+            ihProgramDeclared: positive,
+            paProgramDeclared: false,
+            hmProgramDeclared: false,
+          }),
+        ),
+        count: 1200,
+      });
+      await setMock({ fetchDisasters });
+      const result = await runToolContract(femaGetDisaster, { disaster_number: 4781 });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        areas_truncated: true,
+        total_designated_area_count: 1200,
+        designated_area_count: 1000,
+        ia_declared: positive,
+        pa_declared: false,
+        notice: expect.stringContaining('program flags cover only fetched rows'),
+      });
+      const text = result.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      expect(text).toContain('1000 of 1200');
+      expect(text).toContain('fema_query_dataset');
+      expect(text).not.toContain('**Programs Declared:** None');
+      expect(fetchDisasters).toHaveBeenCalledTimes(1);
+      expect(fetchDisasters.mock.calls[0]?.[0].top).toBe(1000);
+    },
+  );
+
   beforeEach(async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({

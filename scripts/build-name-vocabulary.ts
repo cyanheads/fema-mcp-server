@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 /**
  * @fileoverview Regenerate `src/services/openfema/name-vocabulary.ts` — the snapshot of
- * stored `designatedArea` and `incidentType` strings the case-insensitive name matcher
+ * stored declaration `designatedArea` / `incidentType` and PA `county` strings the matcher
  * resolves caller input against.
  *
- * Reads every row of OpenFEMA's `DisasterDeclarationsSummaries` (v2) with only those two
- * fields selected, sequentially and one second apart (about 8 requests of 10,000 rows),
+ * Downloads both complete v2 name sources sequentially, with bounded transient retries
+ * and strict completeness checks. PA excludes null counties, which contribute no name. It
  * collects the distinct values, and writes them sorted with the run's UTC date as the
- * as-of date. The output is formatted with Biome so devcheck sees no drift.
+ * as-of date. A formatted temporary file replaces the snapshot only after both sources pass.
  *
  * Run it when OpenFEMA adds names the snapshot lacks: `bun run vocabulary:build`.
  *
@@ -15,15 +15,16 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import process from 'node:process';
 
 const ENDPOINT = 'https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries';
-const PAGE_SIZE = 10_000;
+const PA_ENDPOINT = 'https://www.fema.gov/api/open/v2/PublicAssistanceFundedProjectsDetails';
 const OUTPUT = resolve('src/services/openfema/name-vocabulary.ts');
 
 interface Row {
+  county?: string;
   designatedArea?: string;
   incidentType?: string;
 }
@@ -31,65 +32,138 @@ interface Row {
 interface Page {
   DisasterDeclarationsSummaries?: Row[];
   metadata?: { count?: number };
+  PublicAssistanceFundedProjectsDetails?: Row[];
 }
 
-const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+/** Pace source reads and retries without sleeping past their deadline. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((done, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      done();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
 
-/** One page, `$`-parameters percent-encoded as OpenFEMA's CDN requires. */
-async function fetchPage(skip: number): Promise<Page> {
-  const url =
-    `${ENDPOINT}?%24inlinecount=allpages&%24select=designatedArea%2CincidentType` +
-    `&%24orderby=id&%24top=${PAGE_SIZE}&%24skip=${skip}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`OpenFEMA returned HTTP ${response.status} for rows from offset ${skip}.`);
+/** Complete selected source, with three transient attempts sharing one six-minute deadline. */
+async function fetchSource(
+  endpoint: string,
+  select: string,
+  orderby: string,
+  signal: AbortSignal,
+): Promise<Page> {
+  const parts = [
+    '%24inlinecount=allpages',
+    `%24select=${encodeURIComponent(select)}`,
+    ...(orderby ? [`%24orderby=${orderby}`] : []),
+    '%24format=json',
+    '%24allrecords=true',
+    ...(endpoint === PA_ENDPOINT ? ['%24filter=county%20ne%20null'] : []),
+  ];
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(6 * 60_000)]);
+  for (let attempt = 0; ; attempt++) {
+    deadline.throwIfAborted();
+    let response: Response;
+    try {
+      response = await fetch(`${endpoint}?${parts.join('&')}`, { signal: deadline });
+      if (response.ok) return (await response.json()) as Page;
+    } catch (error) {
+      deadline.throwIfAborted();
+      if (attempt === 2 || error instanceof SyntaxError) throw error;
+      await sleep(1000 * (attempt + 1), deadline);
+      continue;
+    }
+    await response.body?.cancel();
+    if (attempt === 2 || ![408, 429, 500, 502, 503, 504].includes(response.status)) {
+      throw new Error(`OpenFEMA returned HTTP ${response.status} while downloading ${endpoint}.`);
+    }
+    if (response.status >= 500) {
+      const first = parts.shift();
+      if (first !== undefined) parts.push(first);
+    }
+    await sleep(1000 * (attempt + 1), deadline);
   }
-  return (await response.json()) as Page;
 }
 
-const areas = new Set<string>();
-const incidentTypes = new Set<string>();
-let total = Number.POSITIVE_INFINITY;
-let read = 0;
-for (let skip = 0; skip < total; skip += PAGE_SIZE) {
-  if (skip > 0) await sleep(1000);
-  const page = await fetchPage(skip);
-  const rows = page.DisasterDeclarationsSummaries ?? [];
-  total = page.metadata?.count ?? 0;
-  if (rows.length === 0) break;
-  read += rows.length;
-  for (const { designatedArea, incidentType } of rows) {
-    if (designatedArea?.trim()) areas.add(designatedArea);
-    if (incidentType?.trim()) incidentTypes.add(incidentType);
+/** Read both sources completely before atomically publishing their formatted vocabulary. */
+export async function buildNameVocabulary(output = OUTPUT): Promise<void> {
+  const signal = AbortSignal.timeout(8 * 60_000);
+  const areas = new Set<string>();
+  const incidentTypes = new Set<string>();
+  const counties = new Set<string>();
+  const counts: number[] = [];
+  for (const [endpoint, select, orderby, entity] of [
+    [ENDPOINT, 'designatedArea,incidentType', 'id', 'DisasterDeclarationsSummaries'],
+    [PA_ENDPOINT, 'county', '', 'PublicAssistanceFundedProjectsDetails'],
+  ] as const) {
+    signal.throwIfAborted();
+    if (counts.length > 0) await sleep(1000, signal);
+    const page = await fetchSource(endpoint, select, orderby, signal);
+    const rows = page[entity];
+    const count = page.metadata?.count;
+    if (
+      typeof count !== 'number' ||
+      !Number.isSafeInteger(count) ||
+      count <= 0 ||
+      !Array.isArray(rows)
+    ) {
+      throw new Error(`Invalid ${entity} envelope; refusing to write a partial vocabulary.`);
+    }
+    if (rows.length !== count) {
+      throw new Error(
+        `Incomplete ${entity}: read ${rows.length} of ${count} rows; refusing to write a partial vocabulary.`,
+      );
+    }
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') throw new Error(`Invalid ${entity} row.`);
+      for (const [value, target] of [
+        [row.designatedArea, areas],
+        [row.incidentType, incidentTypes],
+        [row.county, counties],
+      ] as const) {
+        if (value === undefined || value === null) continue;
+        if (typeof value !== 'string') throw new Error(`Invalid ${entity} name field.`);
+        if (value.trim()) target.add(value);
+      }
+    }
+    console.log(
+      `  ${entity}: read ${rows.length.toLocaleString('en-US')} of ${count.toLocaleString('en-US')} rows`,
+    );
+    counts.push(rows.length);
   }
-  console.log(`  read ${read.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} rows`);
-}
-if (read < total) {
-  throw new Error(`Read ${read} of ${total} rows; refusing to write a partial vocabulary.`);
-}
+  if (!areas.size || !incidentTypes.size || !counties.size)
+    throw new Error('A vocabulary source contained no names; refusing to replace the snapshot.');
 
-/**
- * The matcher maps a match in a lowercased value back to the stored value by position, which
- * holds only when lowercasing keeps every value's length — true of the ASCII OpenFEMA stores.
- */
-for (const value of [...areas, ...incidentTypes]) {
-  if (value.toLowerCase().length !== value.length) {
-    throw new Error(`"${value}" changes length when lowercased; the matcher cannot index it.`);
+  /**
+   * The matcher maps a match in a lowercased value back to the stored value by position, which
+   * holds only when lowercasing keeps every value's length, checked for both sources here.
+   */
+  for (const value of [...areas, ...incidentTypes, ...counties]) {
+    if (value.toLowerCase().length !== value.length) {
+      throw new Error(`"${value}" changes length when lowercased; the matcher cannot index it.`);
+    }
   }
-}
 
-const sorted = (values: Set<string>) => [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-const list = (values: Set<string>) =>
-  sorted(values)
-    .map((value) => `  ${JSON.stringify(value)},`)
-    .join('\n');
-const asOf = new Date().toISOString().slice(0, 10);
+  const sorted = (values: Set<string>) => [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const list = (values: Set<string>) =>
+    sorted(values)
+      .map((value) => `  ${JSON.stringify(value)},`)
+      .join('\n');
+  const asOf = new Date().toISOString().slice(0, 10);
 
-writeFileSync(
-  OUTPUT,
-  `/**
- * @fileoverview Snapshot of the name strings OpenFEMA stores in DisasterDeclarationsSummaries,
- * read on ${asOf} from all ${read.toLocaleString('en-US')} rows. Generated by
+  const temporary = `${output}.${process.pid}.tmp.ts`;
+  try {
+    writeFileSync(
+      temporary,
+      `/**
+ * @fileoverview Snapshot of OpenFEMA names read on ${asOf}: all ${counts[0]?.toLocaleString('en-US')} declaration rows
+ * and ${counts[1]?.toLocaleString('en-US')} nonnull-county PublicAssistanceFundedProjectsDetails rows (v2). Generated by
  * \`bun run vocabulary:build\` (scripts/build-name-vocabulary.ts) — do not edit by hand.
  * @module services/openfema/name-vocabulary
  */
@@ -106,11 +180,27 @@ ${list(incidentTypes)}
 export const DESIGNATED_AREAS: readonly string[] = [
 ${list(areas)}
 ];
-`,
-);
 
-const format = spawnSync('bunx', ['biome', 'format', '--write', OUTPUT], { stdio: 'inherit' });
-if (format.status !== 0) process.exit(format.status ?? 1);
-console.log(
-  `Wrote ${OUTPUT}: ${incidentTypes.size} incident types, ${areas.size} designated areas (as of ${asOf}).`,
-);
+/** Every distinct nonblank PA \`county\` value (${counties.size}). */
+export const PA_COUNTIES: readonly string[] = [
+${list(counties)}
+];
+`,
+    );
+
+    const format = spawnSync('bunx', ['biome', 'format', '--write', temporary], {
+      stdio: 'inherit',
+      timeout: 30_000,
+    });
+    if (format.status !== 0) throw new Error('Vocabulary formatting failed; snapshot unchanged.');
+    signal.throwIfAborted();
+    renameSync(temporary, output);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  console.log(
+    `Wrote ${output}: ${incidentTypes.size} incident types, ${areas.size} designated areas, ${counties.size} PA counties (as of ${asOf}).`,
+  );
+}
+
+if (import.meta.main) await buildNameVocabulary();

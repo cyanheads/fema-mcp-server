@@ -247,35 +247,30 @@ describe('femaSearchDisasters', () => {
     });
   });
 
-  it('throws no_results when query returns empty rows', async () => {
+  it('returns zero totals when query returns empty rows', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
     });
     const ctx = createMockContext({ errors: femaSearchDisasters.errors });
     const input = femaSearchDisasters.input.parse({ state: 'TX' });
-    await expect(femaSearchDisasters.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_results' },
+    await expect(femaSearchDisasters.handler(input, ctx)).resolves.toMatchObject({
+      declarations: [],
+      total_declarations: 0,
+      total_area_rows: 0,
+      returned_count: 0,
     });
   });
 
-  it('includes contextual guidance in recovery hint on no_results', async () => {
+  it('includes only supplied filters in zero-match guidance', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
     });
-    const ctx = createMockContext({ errors: femaSearchDisasters.errors });
-    const input = femaSearchDisasters.input.parse({ state: 'WY', incident_type: 'Hurricane' });
-    let caught: unknown;
-    try {
-      await femaSearchDisasters.handler(input, ctx);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toMatchObject({
-      data: {
-        reason: 'no_results',
-        recovery: { hint: expect.stringContaining('No disaster declarations matched') },
-      },
+    const result = await runToolContract(femaSearchDisasters, {
+      state: 'WY',
+      incident_type: 'Hurricane',
     });
+    expect(contentText(result)).toContain('state, incident_type');
+    expect(contentText(result)).not.toMatch(/county|date range/);
   });
 
   it('handles sparse upstream rows with missing optional fields', async () => {
@@ -460,16 +455,33 @@ describe('femaSearchDisasters — date filters', () => {
 });
 
 describe('femaSearchDisasters — empty match', () => {
-  it('returns no_results with its contract code and recovery on both surfaces', async () => {
+  it('does not invent a last valid offset when the whole capped window is on its boundary day', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: [makeDisasterRow()], count: 10001 }),
+    });
+    const result = await runToolContract(femaSearchDisasters, {});
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      declarations: [],
+      total_declarations: 0,
+      truncated: true,
+    });
+    expect(contentText(result)).toContain('date_to=2024-09-27');
+    expect(contentText(result)).not.toMatch(/last valid offset|No disaster declarations matched/);
+  });
+  it.each([0, 50])('returns empty success at offset %s on both surfaces', async (offset) => {
     await setMock({ fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }) });
-    const result = await runToolContract(femaSearchDisasters, { state: 'WY' });
-    expect(result.isError).toBe(true);
-    const error = errorOf(result);
-    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(error.data.reason).toBe('no_results');
-    expect(error.data.recovery?.hint).toBe(
-      'No disaster declarations matched the search criteria. Broaden the search by removing filters, expanding the date range, or trying a different state or incident type.',
-    );
+    const result = await runToolContract(femaSearchDisasters, { state: 'WY', offset });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      declarations: [],
+      total_declarations: 0,
+      total_area_rows: 0,
+      returned_count: 0,
+      notice: expect.stringContaining('No disaster declarations matched'),
+    });
+    expect(result.structuredContent).not.toHaveProperty('next_offset');
+    expect(contentText(result)).not.toContain('last valid offset');
     expect(contentText(result)).toContain('No disaster declarations matched');
   });
 });

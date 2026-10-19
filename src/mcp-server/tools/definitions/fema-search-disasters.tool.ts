@@ -420,7 +420,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       .string()
       .optional()
       .describe(
-        'Paging guidance: the offset to continue from and whether limit or the response budget ended the page; when offset is at or past the end of the matching declarations, the total and the last valid offset; when truncated is true, that the totals are lower bounds and the date_to (YYYY-MM-DD) to search next for older declarations; when area_totals_unavailable is true, why the area totals could not be read.',
+        'Zero-match guidance for supplied filters; paging guidance with continuation or the last valid offset for nonzero totals; when truncated is true, lower-bound totals and the date_to (YYYY-MM-DD) to search next; when area_totals_unavailable is true, why full area totals could not be read.',
       ),
     next_offset: z
       .number()
@@ -467,13 +467,6 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       when: 'date_from is later than date_to, so no declaration could match.',
       recovery:
         'Swap date_from and date_to so date_from is the earlier date; equal dates select a single day.',
-    },
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'Query returned zero disaster declarations.',
-      recovery:
-        'Broaden the search by removing filters, expanding the date range, or trying a different state or incident type.',
     },
     {
       reason: 'request_too_long',
@@ -592,15 +585,6 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       }
     }
 
-    if (disasterMap.size === 0) {
-      throw ctx.fail('no_results', 'No disaster declarations matched the query.', {
-        ...ctx.recoveryFor('no_results'),
-        recovery: {
-          hint: 'No disaster declarations matched the search criteria. Broaden the search by removing filters, expanding the date range, or trying a different state or incident type.',
-        },
-      });
-    }
-
     // offset/limit apply to declarations, not area rows.
     const page = Array.from(disasterMap.values()).slice(input.offset, input.offset + input.limit);
 
@@ -648,7 +632,21 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
         error: totals.message,
       });
     }
-    if (returned === 0) {
+    if (count === 0) {
+      const filters = [
+        input.state && 'state',
+        input.incident_type?.trim() && 'incident_type',
+        input.declaration_type && 'declaration_type',
+        input.county?.trim() && 'county',
+        (input.date_from || input.date_to) && 'date range',
+      ].filter(Boolean);
+      notice.push(
+        'No disaster declarations matched the filters. ' +
+          (filters.length > 0
+            ? `Broaden the search by removing or widening ${filters.join(', ')}.`
+            : 'Try the search again later; OpenFEMA returned no declarations.'),
+      );
+    } else if (returned === 0 && total > 0) {
       notice.push(
         `Offset ${input.offset} is past the end of the ${scope}; the last valid offset is ${total - 1}.`,
       );

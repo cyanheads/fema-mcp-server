@@ -7,12 +7,12 @@
  * @module services/openfema/name-matcher
  */
 
-import { DESIGNATED_AREAS, INCIDENT_TYPES } from './name-vocabulary.js';
+import { DESIGNATED_AREAS, INCIDENT_TYPES, PA_COUNTIES } from './name-vocabulary.js';
 import { escapeODataString } from './openfema-service.js';
 
 /**
- * Each stored value beside its lowercased form. The snapshot is ASCII, so lowercasing keeps
- * every value's length and a match position in the lowered form is the same in the value.
+ * Each stored value beside its lowercased form. The generator verifies that lowercasing
+ * preserves lengths, so match positions in the lowered form also index the stored value.
  */
 type IndexedVocabulary = readonly (readonly [value: string, lowered: string])[];
 
@@ -27,12 +27,13 @@ const index = (values: readonly string[]): IndexedVocabulary =>
 const AREA_TYPE = /^(.+) \((County|Parish|Borough|Census Area)\)$/;
 
 const AREA_VOCABULARY = index([
-  ...new Set(
-    DESIGNATED_AREAS.flatMap((area) => {
+  ...new Set([
+    ...PA_COUNTIES,
+    ...DESIGNATED_AREAS.flatMap((area) => {
       const typed = AREA_TYPE.exec(area);
       return typed ? [area, `${typed[1]} ${typed[2]}`] : [area];
     }),
-  ),
+  ]),
 ]);
 const INCIDENT_TYPE_VOCABULARY = index(INCIDENT_TYPES);
 
@@ -72,9 +73,8 @@ function spellingsIn(input: string, vocabulary: IndexedVocabulary): string[] {
 
 /**
  * Exact-case spellings of a county or other designated-area name, resolved against the
- * `designatedArea` values of DisasterDeclarationsSummaries and their `<name> <type>` forms.
- * Name casing is shared across OpenFEMA datasets, so the result also serves county fields
- * stored in other forms (`Harris County`, `Harris (County)`).
+ * declaration `designatedArea` values, their `<name> <type>` forms, and PA `county` values.
+ * Exact PA spellings are included even where declaration names differ beyond casing.
  */
 export function countySpellings(input: string): string[] {
   return spellingsIn(input, AREA_VOCABULARY);

@@ -60,6 +60,54 @@ function makeDisasterRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('femaDisasterResource', () => {
+  it('keeps a complete 500-row declaration without truncation metadata (#54)', async () => {
+    const fetchDisasters = vi.fn().mockResolvedValue({
+      rows: Array.from({ length: 500 }, () => makeDisasterRow()),
+      count: 500,
+    });
+    await setMock({ fetchDisasters });
+    const result = await femaDisasterResource.handler(
+      { disasterNumber: '4781' },
+      createMockContext({ errors: femaDisasterResource.errors }),
+    );
+    expect(result).toMatchObject({ designated_area_count: 500, programs_declared: ['IA', 'PA'] });
+    for (const key of ['areas_truncated', 'total_designated_area_count', 'notice'])
+      expect(result).not.toHaveProperty(key);
+    expect(fetchDisasters).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'includes partial program evidence in the summary itself: %s (#54)',
+    async (positive) => {
+      const fetchDisasters = vi.fn().mockResolvedValue({
+        rows: Array.from({ length: 500 }, () =>
+          makeDisasterRow({
+            ihProgramDeclared: positive,
+            paProgramDeclared: false,
+            hmProgramDeclared: false,
+          }),
+        ),
+        count: 1200,
+      });
+      await setMock({ fetchDisasters });
+      const result = await femaDisasterResource.handler(
+        { disasterNumber: '4781' },
+        createMockContext({ errors: femaDisasterResource.errors }),
+      );
+      expect(result).toMatchObject({
+        areas_truncated: true,
+        total_designated_area_count: 1200,
+        designated_area_count: 500,
+        programs_declared: positive ? ['IA'] : [],
+        notice: expect.stringContaining('500 of 1200'),
+      });
+      expect(JSON.stringify(result)).toContain('program flags cover only fetched rows');
+      expect(JSON.stringify(result)).toContain('fema_query_dataset');
+      expect(fetchDisasters).toHaveBeenCalledTimes(1);
+      expect(fetchDisasters.mock.calls[0]?.[0].top).toBe(500);
+    },
+  );
+
   beforeEach(async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({

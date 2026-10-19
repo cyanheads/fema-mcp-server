@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tool: fema_get_disaster — fetch all designated-area rows for a specific disaster.
+ * @fileoverview Tool: fema_get_disaster — bounded designated-area details for a specific disaster.
  * @module mcp-server/tools/definitions/fema-get-disaster
  */
 
@@ -10,8 +10,8 @@ import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 export const femaGetDisaster = tool('fema_get_disaster', {
   title: 'Get FEMA Disaster Details',
   description:
-    'Fetch all designated-area rows for a specific FEMA disaster by disaster number (e.g., 4781). ' +
-    'Returns every county/municipality designated under the declaration along with programs activated, ' +
+    'Fetch up to 1,000 designated-area rows for a specific FEMA disaster by disaster number (e.g., 4781). ' +
+    'Discloses partial area and program coverage when more rows exist. Returns counties/municipalities along with programs observed, ' +
     'incident period, and state info. Use fema_search_disasters to find disaster numbers. ' +
     'The returned disaster_number chains to fema_get_public_assistance and fema_get_housing_assistance.',
   annotations: { readOnlyHint: true, openWorldHint: false },
@@ -44,12 +44,18 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     ia_declared: z
       .boolean()
       .describe(
-        'True when the Individuals and Households Program (IHP) was declared — indicates IA housing/personal grants are available.',
+        'True when IHP was declared in a fetched row. When areas_truncated is true, false does not exclude IHP in unfetched rows.',
       ),
     pa_declared: z
       .boolean()
-      .describe('True when Public Assistance (infrastructure recovery grants) was declared.'),
-    hm_declared: z.boolean().describe('True when Hazard Mitigation grants were declared.'),
+      .describe(
+        'True when PA was declared in a fetched row. When areas_truncated is true, false does not exclude PA in unfetched rows.',
+      ),
+    hm_declared: z
+      .boolean()
+      .describe(
+        'True when HM was declared in a fetched row. When areas_truncated is true, false does not exclude HM in unfetched rows.',
+      ),
     designated_areas: z
       .array(
         z
@@ -66,11 +72,29 @@ export const femaGetDisaster = tool('fema_get_disaster', {
           })
           .describe('A single designated area entry.'),
       )
-      .describe('All counties/municipalities designated for assistance under this declaration.'),
+      .describe('Fetched counties/municipalities designated for assistance, up to 1,000 rows.'),
     designated_area_count: z
       .number()
-      .describe('Total number of designated areas in this declaration.'),
+      .describe('Number of designated-area rows fetched for this declaration.'),
+    areas_truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when designated-area rows remain unfetched; program flags cover only fetched rows.',
+      ),
+    total_designated_area_count: z
+      .number()
+      .optional()
+      .describe('Upstream total designated-area rows, present when areas_truncated is true.'),
   }),
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Returned/total area counts and partial program evidence, with the dataset tool for full rows.',
+      ),
+  },
   errors: [
     {
       reason: 'not_found',
@@ -95,7 +119,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     }
 
     const svc = getOpenFemaService();
-    const { rows } = await svc.fetchDisasters(
+    const { rows, count } = await svc.fetchDisasters(
       {
         filter: `disasterNumber eq ${input.disaster_number}`,
         select:
@@ -129,6 +153,12 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     const ia_declared = rows.some((r) => r.ihProgramDeclared === true);
     const pa_declared = rows.some((r) => r.paProgramDeclared === true);
     const hm_declared = rows.some((r) => r.hmProgramDeclared === true);
+    const partial = count > rows.length;
+    if (partial) {
+      ctx.enrich.notice(
+        `Returned ${rows.length} of ${count} designated-area rows; program flags cover only fetched rows. False flags do not establish absence in the full declaration. Use fema_query_dataset with DisasterDeclarationsSummaries and filter disasterNumber eq ${input.disaster_number} for the full rows.`,
+      );
+    }
 
     ctx.log.info('Disaster fetch complete', {
       disasterNumber: input.disaster_number,
@@ -149,6 +179,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       hm_declared,
       designated_areas: designatedAreas,
       designated_area_count: designatedAreas.length,
+      ...(partial ? { areas_truncated: true, total_designated_area_count: count } : {}),
     };
   },
 
@@ -171,9 +202,13 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     if (result.ia_declared) programs.push('Individual Assistance (IA)');
     if (result.pa_declared) programs.push('Public Assistance (PA)');
     if (result.hm_declared) programs.push('Hazard Mitigation (HM)');
-    lines.push(`**Programs Declared:** ${programs.length > 0 ? programs.join(', ') : 'None'}`);
+    lines.push(
+      `**Programs ${result.areas_truncated ? 'Observed in Fetched Rows' : 'Declared'}:** ${programs.length > 0 ? programs.join(', ') : result.areas_truncated ? 'None observed; unfetched rows may declare programs' : 'None'}`,
+    );
     lines.push('');
-    lines.push(`## Designated Areas (${result.designated_area_count})`);
+    lines.push(
+      `## Designated Areas (${result.designated_area_count}${result.areas_truncated ? ` of ${result.total_designated_area_count}; partial coverage` : ''})`,
+    );
     for (const area of result.designated_areas) {
       const fips =
         area.fips_state_code && area.fips_county_code

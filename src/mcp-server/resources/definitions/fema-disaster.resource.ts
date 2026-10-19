@@ -11,7 +11,7 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
   name: 'FEMA Disaster Declaration',
   description:
     'Summary for a specific FEMA disaster declaration — title, state, incident type, ' +
-    'programs declared (IA/PA/HM), incident period, and designated area count. ' +
+    'programs observed (IA/PA/HM), incident period, and fetched designated area count (up to 500 rows), with disclosure when coverage is partial. ' +
     'Read-once context injection for agents already holding a disaster number.',
   params: z.object({
     disasterNumber: z
@@ -49,7 +49,7 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
     }
 
     const svc = getOpenFemaService();
-    const { rows } = await svc.fetchDisasters(
+    const { rows, count } = await svc.fetchDisasters(
       {
         filter: `disasterNumber eq ${num}`,
         select:
@@ -87,6 +87,13 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
       incident_end_date: first.incidentEndDate,
       programs_declared: programs,
       designated_area_count: rows.length,
+      ...(count > rows.length
+        ? {
+            areas_truncated: true,
+            total_designated_area_count: count,
+            notice: `Returned ${rows.length} of ${count} designated-area rows; program flags cover only fetched rows. An empty programs_declared list does not establish absence in the full declaration. Use fema_query_dataset with DisasterDeclarationsSummaries and filter disasterNumber eq ${num} for the full rows.`,
+          }
+        : {}),
     };
 
     ctx.log.info('Disaster resource fetched', { disasterNumber: num });
