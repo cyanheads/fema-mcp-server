@@ -156,7 +156,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The dataset name is not in the OpenFEMA dataset catalog.',
       recovery:
-        'Check the exact dataset entity name at https://www.fema.gov/about/openfema/data-sets. Names are case-sensitive (e.g., NfipClaims not nfipClaims).',
+        'List catalog names with fema_query_dataset on dataset DataSets (select name,version,title). Names are case-sensitive (e.g., NfipClaims not nfipClaims).',
     },
     {
       reason: 'dataset_not_served',

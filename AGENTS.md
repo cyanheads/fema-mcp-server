@@ -2,9 +2,9 @@
 
 **Server:** fema-mcp-server
 **Version:** 0.4.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -247,9 +247,18 @@ src/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Keep root `skills/` reserved for end-user plugin skills.
+Two skill trees live at the project root, written for different readers:
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+| Tree | For | Written by |
+|:-----|:----|:-----------|
+| `framework-skills/` | The agent developing this server — framework skills (`metadata.audience: external`) plus any development-time skills of the server's own | `init` and the `maintenance` sync (framework skills); you (your own) |
+| `skills/` | The agents that install the server and call its tools — tool chains, identifier sources, gates | You, deliberately, with the `add-skill` skill. Absent by default; usually none is needed |
+
+Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
+
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
 Available skills:
 
@@ -261,6 +270,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -308,7 +318,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | Upgrade vulnerable dependencies within existing ranges; first response to a transitive advisory. |
 | `bun run audit:refresh` | Delete the lockfile and reinstall as a last resort after `audit:fix`, targeted update, and dedupe. Re-resolves every ranged dependency. |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `.mcpbignore` coverage, plugin manifests, the published `skills/` tree (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run vocabulary:build` | Regenerate `src/services/openfema/name-vocabulary.ts`, the name snapshot the case-insensitive filters resolve against, from live OpenFEMA |
@@ -327,11 +337,11 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 GitHub Actions carries only `.github/workflows/codeql.yml`; verification runs locally. CodeQL default setup must remain off for the file workflow to run.
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: agent docs at a dependency's package root (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md` — a `skills/` deeper in a package, such as the MCP SDK's runtime `dist/ext/skills/`, ships); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp`, which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases, and `better-sqlite3`'s `deps/` and `src/` C sources. `tests/scripts/bundle-agent-docs.test.ts` pins the agent-doc selector the cleaner and `lint:packaging` share. The bundle ships without the DuckDB native, so `manifest.json` pins `CANVAS_PROVIDER_TYPE` to `none`: Claude Desktop runs inline-only, `fema_search_nfip` pages claims by `offset`, and `fema_dataframe_describe` and `fema_dataframe_query` return `canvas_unavailable`. Every other deployment gets DataCanvas by default — after loading `.env`, `src/index.ts` sets `duckdb` when the variable is unset, blank, or an unsubstituted `${…}` placeholder; `none` disables it. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match.
 
-Every bundle option is wired as `${user_config.<key>}`, and optional string options declare `default: ""`. The bundle cleaner removes both `framework-skills/` and legacy `skills/` from dependencies.
+Every bundle option is wired as `${user_config.<key>}`, and optional string options declare `default: ""`.
 
 **README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and the `base64` / `encodeURIComponent` config-generation commands are ship-time concerns — run the `polish-docs-meta` skill, which carries the badge format, layout, and generation snippets in `framework-skills/polish-docs-meta/references/readme.md`.
 
@@ -396,7 +406,10 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] `plugin.json` + `mcp.json` (Agent Plugins 1.0.0 — read by Codex, Cursor, GitHub Copilot, VS Code, Kiro) populated — `plugin.json` `name` = the unscoped repo name; `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords` from `package.json`; no other top-level field. `mcp.json` holds one `"type": "stdio"` entry keyed by the unscoped name, `npx -y @cyanheads/fema-mcp-server`, and the same fixed `env` as `.codex-plugin/mcp.json`. Neither file carries a user-supplied variable; `.codex-plugin/plugin.json` keeps `"mcpServers": "./.codex-plugin/mcp.json"`.
 - [ ] `.codex-plugin/plugin.json` populated from `package.json`; `interface.displayName` is the bare repository name, and `interface.shortDescription` matches the package description.
 - [ ] `.codex-plugin/mcp.json` uses the bare repository name as its key; user-supplied variables are forwarded through `env_vars`, never empty `env` entries.
 - [ ] `.claude-plugin/plugin.json` metadata matches `package.json`; the inline `mcpServers` key is the bare repository name. User-supplied variables use declared `userConfig` options and `${user_config.<option>}` references.
+- [ ] Any new root dev path has a root-anchored line in `.mcpbignore`; `bun run bundle` and `lint:packaging` pass
+- [ ] If the server publishes a skill in root `skills/`: `lint:packaging` passes, and `field-test` verified every gate and identifier claim in it against live tool behavior
 - [ ] `bun run devcheck` passes

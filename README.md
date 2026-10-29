@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/fema-mcp-server</h1>
   <p><b>Query FEMA disaster declarations, public assistance grants, housing aid, and NFIP flood insurance claims via MCP. STDIO or Streamable HTTP.</b>
-  <div>8 Tools • 1 Opt-in Tool • 1 Resource</div>
+  <div>8 Tools • 1 Opt-in Tool • 1 Resource • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fema-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fema-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fema-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/fema-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/fema-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/fema-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -39,7 +39,7 @@ Federal disaster recovery data from FEMA: disaster declarations, public assistan
 | `fema_get_disaster` | Fetch up to 1,000 designated-area records for a specific disaster, with partial-coverage disclosure |
 | `fema_get_public_assistance` | Public assistance funded projects for a disaster or state — where federal recovery money went |
 | `fema_get_housing_assistance` | Individual assistance housing data for a disaster — owner and renter breakdowns and inspection counts by county/ZIP, filterable by county or ZIP |
-| `fema_search_nfip` | NFIP flood insurance claims for a state, county, or ZIP, with optional DataCanvas spillover for SQL analytics |
+| `fema_search_nfip` | NFIP flood insurance claims for a state, county, or ZIP, with DataCanvas spillover for SQL analytics |
 | `fema_dataframe_describe` | List columns and row counts for DataCanvas tables staged by `fema_search_nfip` |
 | `fema_dataframe_query` | Run a SELECT query against a DataCanvas table staged by `fema_search_nfip` |
 | `fema_dataframe_drop` | Remove a staged DataCanvas table or view — opt-in, absent from `tools/list` by default |
@@ -54,6 +54,14 @@ Federal disaster recovery data from FEMA: disaster declarations, public assistan
 | `fema://disaster/{disasterNumber}` | Summary for a specific FEMA disaster declaration — title, state, incident type, programs, incident period |
 
 All resource data is also reachable via tools. Use `fema_get_disaster` for designated-area detail (up to 1,000 rows).
+
+### Skills
+
+| Skill | Description |
+|:---|:---|
+| `fema-guide` | Gates, identifier sources, and OData syntax for the `fema_*` tools: county naming across datasets, dollar totals, NFIP scoping, and `fema_query_dataset` filters |
+
+Plugin installs pick up the root `skills/` tree; MCP clients that support the Skills extension read it as `skill://fema-guide/SKILL.md`.
 
 ## Capability reference
 
@@ -91,7 +99,7 @@ All resource data is also reachable via tools. Use `fema_get_disaster` for desig
 - Requires `state`; optional `county_code` (5-digit FIPS like `48201`, or a 3-digit code like `201` that gets the state prefix), `zip_code`, `year_from`/`year_to`, `limit` (1–10000, default 1000), and `offset`. Results come newest loss first.
 - Inline claims stop at 100,000 characters; `next_offset` and `notice` say how to continue. Errors: `invalid_state`, `invalid_county_code` (anything but 1–5 digits, or a short code for FM, MH, or PW), `invalid_range` (`year_from` after `year_to`).
 - County searches check for claims without a county code across the same state/year range, using one count-only exchange with no retries and a two-second deadline. The response uses the count only if ready with the primary page; otherwise it says coverage was not checked. These claims cannot be allocated to the selected county or ZIP. Removing `county_code` and optionally searching known ZIPs may help; ZIP results are not guaranteed complete or equivalent to a county.
-- With `CANVAS_PROVIDER_TYPE=duckdb`, a first-page match over the inline limit stages up to 50,000 rows. `canvas_id`, `canvas_table`, and `staged_count` identify the stage, `truncated: true` marks its cap, and `total_count` is the full match. Inspect it with `fema_dataframe_describe`, then query it with `fema_dataframe_query`.
+- With DataCanvas on (the default), a first-page match over the inline limit stages up to 50,000 rows. `canvas_id`, `canvas_table`, and `staged_count` identify the stage, `truncated: true` marks its cap, and `total_count` is the full match. Inspect it with `fema_dataframe_describe`, then query it with `fema_dataframe_query`.
 
 ---
 
@@ -151,134 +159,32 @@ Agent-friendly output:
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://fema.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "fema-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://fema.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http fema-mcp-server https://fema.caseyjhand.com/mcp
 ```
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "fema-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/fema-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add fema-mcp-server -- npx -y @cyanheads/fema-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "fema-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/fema-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/fema-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "fema-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "ghcr.io/cyanheads/fema-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-To enable DuckDB-backed SQL analytics for NFIP Claims:
-
-```json
-{
-  "mcpServers": {
-    "fema-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/fema-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "CANVAS_PROVIDER_TYPE": "duckdb"
-      }
-    }
-  }
-}
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API keys required — OpenFEMA is a free, public API.
-- Optional: set `CANVAS_PROVIDER_TYPE=duckdb` to enable SQL analytics over large NFIP Claims result sets.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/fema-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd fema-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# edit .env — no required vars, but CANVAS_PROVIDER_TYPE=duckdb enables SQL analytics
-```
+No API key is required — OpenFEMA is a free, public API. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -288,7 +194,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 |:---------|:------------|:--------|
 | `FEMA_BASE_URL` | OpenFEMA API root. | `https://www.fema.gov/api/open` |
 | `FEMA_REQUEST_TIMEOUT_MS` | Total time budget in milliseconds for one upstream request, including retries. | `30000` |
-| `CANVAS_PROVIDER_TYPE` | Set to `duckdb` to enable DataCanvas SQL analytics for NFIP claims. | — |
+| `CANVAS_PROVIDER_TYPE` | DataCanvas SQL analytics over large NFIP Claims result sets: `duckdb`, or `none` to disable it. The Claude Desktop bundle runs with `none` and returns NFIP claims inline. | `duckdb` |
 | `FEMA_ENABLE_CANVAS_DROP` | Enable the `fema_dataframe_drop` tool. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. | `stateless` |
@@ -309,6 +215,16 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ## Running the server
 
 ### Local development
+
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/fema-mcp-server.git
+  cd fema-mcp-server && bun install
+  cp .env.example .env   # no required variables
+  ```
 
 - **Build and run:**
 
@@ -333,11 +249,10 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ### Docker
 
 ```sh
-docker build -t fema-mcp-server .
-docker run --rm -e MCP_TRANSPORT_TYPE=stdio fema-mcp-server
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/fema-mcp-server:latest
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/fema-mcp-server`. OpenTelemetry peer dependencies are installed by default; build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/fema-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/fema-mcp-server:latest"]`. To build locally, `docker build -t fema-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 
@@ -349,6 +264,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
 | `src/services/openfema` | OpenFEMA REST API client, plus the case-insensitive name matcher and its bundled name vocabulary. |
 | `src/services/canvas` | DataCanvas integration — DuckDB spillover for large NFIP result sets. |
+| `skills/` | Published agent skill (`fema-guide`), served over MCP via `createApp({ skills })`. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide

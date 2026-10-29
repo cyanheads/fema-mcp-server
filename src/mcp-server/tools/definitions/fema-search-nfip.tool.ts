@@ -236,7 +236,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     'Returns the matching claim count and claim records — amounts paid on building and contents, damage estimates, flood zones, cause and occupancy codes, and loss dates — newest loss first. ' +
     'state is required — the full NFIP dataset is 2.7 million rows; unfiltered access is prohibited. ' +
     'Page the inline claims with limit and offset; a page holds at most 100,000 characters of claims, and while claims remain past it, next_offset is the offset to continue from. ' +
-    'When DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) and the match exceeds that inline budget, ' +
+    'When DataCanvas is enabled and the match exceeds that inline budget, ' +
     'a call at offset 0 stages the match (up to 50,000 claims) on a canvas: inspect the staged table with fema_dataframe_describe, ' +
     'then aggregate it with SQL via fema_dataframe_query.',
   annotations: { readOnlyHint: true, openWorldHint: true },

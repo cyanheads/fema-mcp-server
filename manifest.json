@@ -19,7 +19,7 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "FEMA_ENABLE_CANVAS_DROP": "${user_config.fema_enable_canvas_drop}",
+        "CANVAS_PROVIDER_TYPE": "none",
         "NODE_ENV": "production"
       }
     }
@@ -28,14 +28,5 @@
     "runtimes": { "node": ">=24.0.0" }
   },
   "tools_generated": true,
-  "prompts_generated": true,
-  "user_config": {
-    "fema_enable_canvas_drop": {
-      "type": "boolean",
-      "title": "Enable DataCanvas deletion",
-      "description": "Allow fema_dataframe_drop to remove staged tables and views.",
-      "required": false,
-      "default": false
-    }
-  }
+  "prompts_generated": true
 }

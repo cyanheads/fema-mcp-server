@@ -135,7 +135,7 @@ This server fills the gap in the fleet's disaster coverage: `reliefweb` covers i
 
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
-| `CANVAS_PROVIDER_TYPE` | No | Set to `duckdb` to enable DataCanvas for NFIP analytics. Without it, `fema_search_nfip` returns inline pages only (paged by `offset`) and omits `canvas_id`. |
+| `CANVAS_PROVIDER_TYPE` | No | DataCanvas for NFIP analytics: `duckdb` (default) or `none`. After loading `.env`, `src/index.ts` sets `duckdb` when the variable is unset, blank, or an unsubstituted `${…}` placeholder. With `none`, `fema_search_nfip` returns inline pages only (paged by `offset`) and omits `canvas_id`; the Claude Desktop bundle (`manifest.json`) pins `none` because it ships without DuckDB's native bindings. |
 | `FEMA_BASE_URL` | No | Override the API root (default: `https://www.fema.gov/api/open`); each dataset's `/v<N>` is appended per request, and a trailing `/v<N>` on the override is dropped. Useful for test environments. |
 | `FEMA_REQUEST_TIMEOUT_MS` | No | HTTP request timeout in milliseconds (default: 30000). NFIP county queries can be slow. |
 
