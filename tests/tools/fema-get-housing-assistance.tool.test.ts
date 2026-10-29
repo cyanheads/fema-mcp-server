@@ -5,6 +5,7 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import MarkdownIt from 'markdown-it';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 import { femaGetHousingAssistance } from '@/mcp-server/tools/definitions/fema-get-housing-assistance.tool.js';
@@ -227,6 +228,23 @@ describe('femaGetHousingAssistance', () => {
 /** Every text block of a tool result, joined — format() output plus the enrichment trailer. */
 function contentText(result: { content: unknown[] }): string {
   return (result.content as Array<{ text?: string }>).map((block) => block.text ?? '').join('\n');
+}
+
+const commonmark = new MarkdownIt('commonmark');
+
+/** The lines a CommonMark client displays for `markdown`, with emphasis, code spans, and escapes resolved. */
+function renderedLines(markdown: string): string[] {
+  return commonmark
+    .parse(markdown, {})
+    .filter((token) => token.type === 'inline')
+    .flatMap((token) =>
+      (token.children ?? [])
+        .map((child) =>
+          child.type === 'softbreak' || child.type === 'hardbreak' ? '\n' : child.content,
+        )
+        .join('')
+        .split('\n'),
+    );
 }
 
 type ErrorEnvelope = {
@@ -706,9 +724,9 @@ describe('femaGetHousingAssistance — county and zip_code filters (#47)', () =>
       county_filter: 'harris',
       zip_code_filter: '77084',
     });
-    const text = contentText(result);
-    expect(text).toContain('**County filter (case-insensitive substring):** harris');
-    expect(text).toContain('**ZIP code filter:** 77084');
+    const lines = renderedLines(contentText(result));
+    expect(lines).toContain('County filter (case-insensitive substring): harris');
+    expect(lines).toContain('ZIP code filter: 77084');
   });
 
   it('echoes no geography when neither filter is set', async () => {
