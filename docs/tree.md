@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-10-19 01:50:36
+Generated on: 2026-10-29 08:53:06
 
 ```text
 fema-mcp-server/
@@ -28,6 +28,7 @@ fema-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -40,6 +41,8 @@ fema-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -138,6 +141,9 @@ fema-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── fema-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -172,12 +178,15 @@ fema-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── config/
+│   │   ├── canvas-provider-default.test.ts
 │   │   └── server-config.test.ts
 │   ├── helpers/
 │   │   └── openfema-fixtures.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── fema-disaster.resource.test.ts
+│   ├── scripts/
+│   │   └── bundle-agent-docs.test.ts
 │   ├── services/
 │   │   ├── name-matcher.test.ts
 │   │   ├── name-vocabulary-build.test.ts
@@ -215,7 +224,9 @@ fema-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
