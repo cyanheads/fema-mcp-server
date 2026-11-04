@@ -31,7 +31,7 @@ describe('literal result rendering (#67)', () => {
       title: '*title*',
       state: '<b>TX</b>',
       incident_type: '&amp;',
-      declaration_type: 'DR',
+      declaration_type: '*DR*',
       declaration_date: 'date *literal*',
       designated_area_count: 1,
       ia_declared: true,
@@ -59,7 +59,7 @@ describe('literal result rendering (#67)', () => {
     ]) {
       const parsed = inlineText(text).join('\n');
       for (const value of [
-        '*title*',
+        '*DR*-1 — *title*',
         '<b>TX</b>',
         '&amp;',
         'date *literal*',

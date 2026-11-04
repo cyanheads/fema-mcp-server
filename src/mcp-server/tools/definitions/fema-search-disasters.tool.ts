@@ -207,7 +207,7 @@ interface Declaration {
 /** The text block `format()` renders for one declaration — also what the response budget charges it. */
 function renderDeclaration(d: Declaration): string {
   const label = d.declaration_type
-    ? `${literal(d.declaration_type)}-${d.disaster_number}`
+    ? `${d.declaration_type}-${d.disaster_number}`
     : `Disaster #${d.disaster_number}`;
   const lines = [
     `## ${literal(label)} — ${literal(d.title)}`,
