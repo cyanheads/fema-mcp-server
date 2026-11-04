@@ -35,7 +35,7 @@ Every `fema_dataframe_query` reason but `canvas_unavailable` is thrown by the fr
 |:-----|:---------|:-----|:-----|
 | `fema_search_disasters` | `invalid_state` | `ValidationError` | `state` is not a valid 2-letter US state/territory code |
 | `fema_search_disasters` | `invalid_range` | `ValidationError` | `date_from` is later than `date_to`; fails before any request. Equal dates select one day |
-| `fema_search_disasters` | `request_too_long` | `ValidationError` | An `incident_type` or `county` value long enough to push the request URL past the roughly 8,900 characters OpenFEMA's CDN accepts |
+| `fema_search_disasters` | `request_too_long` | `ValidationError` | A `title`, `incident_type`, or `county` value long enough to push the request URL past the roughly 8,900 characters OpenFEMA's CDN accepts |
 | `fema_get_disaster` | `not_found` | `NotFound` | No declaration has the number; a number above 32767 (OpenFEMA's Int16 limit) fails before any request |
 | `fema_get_public_assistance` | `invalid_state` | `ValidationError` | `state` is not a valid 2-letter US state/territory code |
 | `fema_get_public_assistance` | `missing_filter` | `ValidationError` | Neither `disaster_number` nor `state` was provided |
