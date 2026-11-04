@@ -5,6 +5,8 @@
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { internalError, JsonRpcErrorCode, McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import { renderJson, renderNotice, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import {
   continuationNotice,
   rowCharge,
@@ -44,7 +46,8 @@ const SEARCH_BUDGET_MS = 50_000;
  */
 const IN_LIST_CHARS = 7_500;
 
-const AREA_TOTALS_SELECT = 'disasterNumber,ihProgramDeclared,paProgramDeclared,hmProgramDeclared';
+const AREA_TOTALS_SELECT =
+  'disasterNumber,iaProgramDeclared,ihProgramDeclared,paProgramDeclared,hmProgramDeclared';
 
 /** `disasterNumber in (…)` filters covering `numbers` in order, each within IN_LIST_CHARS once URL-encoded. */
 function inListFilters(numbers: readonly number[]): string[] {
@@ -114,7 +117,7 @@ async function readAreaTotals(
       const num = row.disasterNumber ?? 0;
       const t = totals.get(num) ?? { count: 0, ia: false, pa: false, hm: false };
       t.count += 1;
-      t.ia ||= row.ihProgramDeclared === true;
+      t.ia ||= row.iaProgramDeclared === true || row.ihProgramDeclared === true;
       t.pa ||= row.paProgramDeclared === true;
       t.hm ||= row.hmProgramDeclared === true;
       totals.set(num, t);
@@ -204,16 +207,16 @@ interface Declaration {
 /** The text block `format()` renders for one declaration — also what the response budget charges it. */
 function renderDeclaration(d: Declaration): string {
   const label = d.declaration_type
-    ? `${d.declaration_type}-${d.disaster_number}`
+    ? `${literal(d.declaration_type)}-${d.disaster_number}`
     : `Disaster #${d.disaster_number}`;
   const lines = [
-    `## ${label} — ${d.title}`,
-    `**State:** ${d.state} | **Type:** ${d.declaration_type} | **Incident:** ${d.incident_type}`,
-    `**Declared:** ${d.declaration_date}`,
+    `## ${literal(label)} — ${literal(d.title)}`,
+    `**State:** ${literal(d.state)} | **Type:** ${literal(d.declaration_type)} | **Incident:** ${literal(d.incident_type)}`,
+    `**Declared:** ${literal(d.declaration_date)}`,
   ];
   if (d.incident_begin_date) {
     lines.push(
-      `**Period:** ${d.incident_begin_date}${d.incident_end_date ? ` → ${d.incident_end_date}` : ' (ongoing)'}`,
+      `**Period:** ${literal(d.incident_begin_date)}${d.incident_end_date ? ` → ${literal(d.incident_end_date)}` : ' (ongoing)'}`,
     );
   }
   lines.push(`**Programs:** ${programList(d)}`);
@@ -222,14 +225,14 @@ function renderDeclaration(d: Declaration): string {
     const areas = d.matched_areas.map((a) => {
       const fips =
         a.fips_state_code && a.fips_county_code
-          ? `FIPS ${a.fips_state_code}${a.fips_county_code}`
+          ? `FIPS ${literal(a.fips_state_code + a.fips_county_code)}`
           : [
-              a.fips_state_code && `state FIPS ${a.fips_state_code}`,
-              a.fips_county_code && `county FIPS ${a.fips_county_code}`,
+              a.fips_state_code && `state FIPS ${literal(a.fips_state_code)}`,
+              a.fips_county_code && `county FIPS ${literal(a.fips_county_code)}`,
             ]
               .filter(Boolean)
               .join(', ');
-      return `${a.area}${fips ? ` (${fips})` : ''} — ${programList(a)}`;
+      return `${literal(a.area)}${fips ? ` (${fips})` : ''} — ${programList(a)}`;
     });
     lines.push(`**Matched Areas:** ${areas.join('; ')}`);
   }
@@ -239,7 +242,7 @@ function renderDeclaration(d: Declaration): string {
 export const femaSearchDisasters = tool('fema_search_disasters', {
   title: 'Search FEMA Disaster Declarations',
   description:
-    'Search federal disaster declarations by state, incident type, declaration type, date range, and county. ' +
+    'Search federal disaster declarations by title, state, incident type, declaration type, date range, and county. ' +
     'Returns deduplicated declaration-level summaries — each disaster number appears once with a ' +
     'designated_area_count showing how many counties/municipalities were designated. ' +
     'The disaster number is the chain key for fema_get_disaster, fema_get_public_assistance, and fema_get_housing_assistance. ' +
@@ -250,6 +253,12 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     'A page holds at most 100,000 characters of declarations; when declarations remain past it, next_offset is the offset to continue from.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
+    title: z
+      .string()
+      .optional()
+      .describe(
+        'Case-insensitive substring of the declaration title (e.g., harvey). A substring can also match unrelated names such as HARVEYTOWN FIRE; it does not identify a unique storm.',
+      ),
     state: z
       .string()
       .length(2)
@@ -290,7 +299,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       .string()
       .optional()
       .describe(
-        'Filter by designated area / county name (e.g., Harris, Los Angeles, dekalb). Case-insensitive substring match: harris also matches Harrison. Selects the declarations that designated a matching area; designated_area_count and the program flags still describe the whole declaration, and matched_areas lists the matching areas.',
+        'Filter by designated area / county name (e.g., Harris, Harris County, Harris (County)). Case-insensitive substring match: bare harris also matches Harrison. Recognized terminal County, Parish, Borough, and Census Area forms match with or without parentheses. Selects declarations by matching areas; declaration counts and flags still describe the whole declaration, and matched_areas lists the matching areas.',
       ),
     limit: z
       .number()
@@ -344,7 +353,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
             ia_declared: z
               .boolean()
               .describe(
-                'True when the Individuals and Households Program (IHP) was declared for any area of the declaration — indicates IA housing/personal grants are available. Describes the whole declaration also when county is set; matched_areas carries each matched area’s own flag.',
+                'True when legacy IA or the Individuals and Households Program (IHP) was declared for any area. Does not guarantee housing records. Describes the whole declaration also when county is set; matched_areas carries each matched area’s own flag.',
               ),
             pa_declared: z
               .boolean()
@@ -376,7 +385,9 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
                       .string()
                       .optional()
                       .describe('3-digit county FIPS code. Absent when not recorded.'),
-                    ia_declared: z.boolean().describe('True when IHP was declared for this area.'),
+                    ia_declared: z
+                      .boolean()
+                      .describe('True when legacy IA or IHP was declared for this area.'),
                     pa_declared: z
                       .boolean()
                       .describe('True when Public Assistance was declared for this area.'),
@@ -448,6 +459,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       ),
   },
   enrichmentTrailer: {
+    notice: { render: renderNotice },
     // Read only when totalCount is written without the total kind-tag: a truncated search.
     totalCount: { label: 'Lower bound on total declarations' },
     area_totals_unavailable: { label: 'Declaration area totals unavailable' },
@@ -472,9 +484,9 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       reason: 'request_too_long',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The incident_type or county value makes the request URL longer than the roughly 8,900 characters OpenFEMA accepts.',
+      when: 'The title, incident_type, or county value makes the request URL longer than the roughly 8,900 characters OpenFEMA accepts.',
       recovery:
-        'Shorten incident_type and county to the name being searched for; stored incident types and county names are a few words long.',
+        'Shorten title, incident_type, or county to the name being searched for; stored names are a few words long.',
     },
   ],
 
@@ -496,6 +508,8 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     const incidentTypes = incidentTypeSpellings(input.incident_type ?? '');
     const counties = countySpellings(input.county ?? '');
     const filterParts: string[] = [];
+    const title = input.title?.trim().toUpperCase();
+    if (title) filterParts.push(anySubstringFilter('declarationTitle', [title]));
     if (input.state) filterParts.push(`state eq '${input.state}'`);
     if (incidentTypes.length > 0) {
       filterParts.push(anySubstringFilter('incidentType', incidentTypes));
@@ -517,7 +531,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
         select:
           'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
-          'ihProgramDeclared,paProgramDeclared,hmProgramDeclared' +
+          'iaProgramDeclared,ihProgramDeclared,paProgramDeclared,hmProgramDeclared' +
           (byCounty ? ',designatedArea,fipsStateCode,fipsCountyCode' : ''),
         orderby: 'declarationDate desc',
         top: OVERFETCH_CAP,
@@ -553,7 +567,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
             area: row.designatedArea ?? 'Unknown',
             ...(row.fipsStateCode ? { fips_state_code: row.fipsStateCode } : {}),
             ...(row.fipsCountyCode ? { fips_county_code: row.fipsCountyCode } : {}),
-            ia_declared: row.ihProgramDeclared ?? false,
+            ia_declared: row.iaProgramDeclared === true || row.ihProgramDeclared === true,
             pa_declared: row.paProgramDeclared ?? false,
             hm_declared: row.hmProgramDeclared ?? false,
           }
@@ -561,8 +575,8 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
       const existing = disasterMap.get(num);
       if (existing) {
         existing.designated_area_count += 1;
-        // OR the IHP flag across all areas: declared for ANY area = declared for the disaster
-        if (row.ihProgramDeclared) existing.ia_declared = true;
+        // Either IA program in any area establishes declaration-level IA.
+        if (row.iaProgramDeclared || row.ihProgramDeclared) existing.ia_declared = true;
         if (row.paProgramDeclared) existing.pa_declared = true;
         if (row.hmProgramDeclared) existing.hm_declared = true;
         if (matchedArea) existing.matched_areas?.push(matchedArea);
@@ -576,7 +590,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
           declaration_date: row.declarationDate ?? '',
           ...(row.incidentBeginDate ? { incident_begin_date: row.incidentBeginDate } : {}),
           ...(row.incidentEndDate ? { incident_end_date: row.incidentEndDate } : {}),
-          ia_declared: row.ihProgramDeclared ?? false,
+          ia_declared: row.iaProgramDeclared === true || row.ihProgramDeclared === true,
           pa_declared: row.paProgramDeclared ?? false,
           hm_declared: row.hmProgramDeclared ?? false,
           designated_area_count: 1,
@@ -634,6 +648,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
     }
     if (count === 0) {
       const filters = [
+        title && 'title',
         input.state && 'state',
         input.incident_type?.trim() && 'incident_type',
         input.declaration_type && 'declaration_type',
@@ -685,6 +700,7 @@ export const femaSearchDisasters = tool('fema_search_disasters', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
     lines.push(
       result.total_area_rows > OVERFETCH_CAP

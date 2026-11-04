@@ -10,6 +10,7 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { femaDataframeQuery } from '@/mcp-server/tools/definitions/fema-dataframe-query.tool.js';
 import { setCanvas } from '@/services/canvas/canvas-accessor.js';
+import { jsonFallback, renderedText } from '../helpers/rendered-markdown.js';
 
 type ErrorEnvelope = {
   code: number;
@@ -160,7 +161,7 @@ describe('fema_dataframe_query against a real DuckDB canvas', () => {
     expect(existsSync(join(process.cwd(), 'x.csv'))).toBe(false);
   });
 
-  it('renders DuckDB structs, lists, NULL, empty strings, pipes, and line breaks one row per line (#43)', async () => {
+  it('preserves DuckDB structs, lists, NULL, empty strings, pipes, and line breaks (#43, #67)', async () => {
     const result = await run(
       "SELECT {'county': county_code} AS loss, 'a|b' AS note, NULL AS n, '' AS e, [1, 2] AS arr, " +
         "'line1' || chr(10) || 'line2' AS nl FROM claims ORDER BY county_code LIMIT 2",
@@ -170,22 +171,22 @@ describe('fema_dataframe_query against a real DuckDB canvas', () => {
       { loss: { county: '48157' }, note: 'a|b', n: null, e: '', arr: [1, 2], nl: 'line1\nline2' },
       { loss: { county: '48201' }, note: 'a|b', n: null, e: '', arr: [1, 2], nl: 'line1\nline2' },
     ]);
-    expect(
-      contentText(result)
-        .split('\n')
-        .filter((line) => line.startsWith('| ')),
-    ).toEqual([
-      '| loss | note | n | e | arr | nl |',
-      '| --- | --- | --- | --- | --- | --- |',
-      '| {"county":"48157"} | a\\|b | null | "" | [1,2] | line1 line2 |',
-      '| {"county":"48201"} | a\\|b | null | "" | [1,2] | line1 line2 |',
-    ]);
+    expect(jsonFallback(contentText(result))).toEqual({
+      canvas_id: canvasId,
+      row_count: 2,
+      rows: [
+        { loss: { county: '48157' }, note: 'a|b', n: null, e: '', arr: [1, 2], nl: 'line1\nline2' },
+        { loss: { county: '48201' }, note: 'a|b', n: null, e: '', arr: [1, 2], nl: 'line1\nline2' },
+      ],
+    });
 
     const header = await run('SELECT 1 AS "a|b", 2 AS c');
-    expect(
-      contentText(header)
-        .split('\n')
-        .filter((line) => line.startsWith('| ')),
-    ).toEqual(['| a\\|b | c |', '| --- | --- |', '| 1 | 2 |']);
+    expect(renderedText(contentText(header))).toEqual([
+      `1 rows | Canvas: ${canvasId}`,
+      'a|b',
+      'c',
+      '1',
+      '2',
+    ]);
   });
 });

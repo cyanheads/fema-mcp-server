@@ -29,6 +29,51 @@ const countyVocabulary = [
 ];
 
 describe('countySpellings', () => {
+  it('preserves genuine name tokens and precise versus bare substring matching', () => {
+    for (const name of [
+      'County Line',
+      'Lake of the Woods',
+      'Lake and Peninsula',
+      'County',
+      'Census Area',
+    ]) {
+      expect(countySpellings(name)).toEqual([name, name.toLowerCase(), name.toUpperCase()]);
+    }
+    expect(countySpellings('harris').some((s) => 'Harrison County'.includes(s))).toBe(true);
+    expect(countySpellings('Harris County').some((s) => 'Harrison County'.includes(s))).toBe(false);
+  });
+
+  it.each([
+    ['Harris', 'County'],
+    ['St. John the Baptist', 'Parish'],
+    ['Lake and Peninsula', 'Borough'],
+    ['Yukon-Koyukuk', 'Census Area'],
+  ])('translates terminal %s %s in both directions without broadening (#58)', (name, type) => {
+    const plain = `${name} ${type}`;
+    const parenthesized = `${name} (${type})`;
+    for (const form of [plain, parenthesized]) {
+      for (const input of [form, form.toLowerCase(), form.toUpperCase(), `  ${form}\t`]) {
+        const spellings = countySpellings(input);
+        expect(spellings).toContain(plain);
+        expect(spellings).toContain(parenthesized);
+        expect(spellings).toContain(input.trim());
+        expect(spellings).not.toContain(name);
+        expect(spellings.some((s) => `${name}son ${type}`.includes(s))).toBe(false);
+      }
+    }
+  });
+
+  it('keeps unknown typed-name fallbacks without synthetic aliases or lost OData quoting (#58)', () => {
+    expect(countySpellings("McZqx O'Brien County")).toEqual([
+      "McZqx O'Brien County",
+      "mczqx o'brien county",
+      "MCZQX O'BRIEN COUNTY",
+      "Mczqx O'Brien County",
+    ]);
+    expect(anySubstringFilter('county', countySpellings("McZqx O'Brien County"))).toContain(
+      "substringof('McZqx O''Brien County', county)",
+    );
+  });
   it.each(['LaSalle Parish', 'Chugach REAA'])(
     'resolves PA-specific stored spelling %s in every case (#52)',
     (stored) => {
@@ -37,6 +82,15 @@ describe('countySpellings', () => {
       }
     },
   );
+  it('keeps a long unknown county filter byte-identical to its original fallback (#58)', () => {
+    const name = 'x'.repeat(1400);
+    expect(countySpellings(`${name} County`)).toEqual([
+      `${name} County`,
+      `${name} county`,
+      `${name.toUpperCase()} COUNTY`,
+      `X${'x'.repeat(1399)} County`,
+    ]);
+  });
   it.each([
     ['harris', ['Harris', 'harris', 'HARRIS']],
     ['HARRIS', ['Harris', 'HARRIS', 'harris']],
@@ -76,16 +130,35 @@ describe('countySpellings', () => {
    * from the PA snapshot, alongside the declaration-derived forms.
    */
   it.each([
-    ['dekalb county', ['DeKalb County', 'dekalb county', 'DEKALB COUNTY', 'Dekalb County']],
-    ['MCLEAN COUNTY', ['McLean County', 'MCLEAN COUNTY', 'mclean county', 'Mclean County']],
-    ['dewitt county', ['DeWitt County', 'dewitt county', 'DEWITT COUNTY', 'Dewitt County']],
+    [
+      'dekalb county',
+      ['DeKalb County', 'dekalb county', 'DEKALB COUNTY', 'Dekalb County', 'DeKalb (County)'],
+    ],
+    [
+      'MCLEAN COUNTY',
+      ['McLean County', 'MCLEAN COUNTY', 'mclean county', 'Mclean County', 'McLean (County)'],
+    ],
+    [
+      'dewitt county',
+      ['DeWitt County', 'dewitt county', 'DEWITT COUNTY', 'Dewitt County', 'DeWitt (County)'],
+    ],
     [
       'yukon-koyukuk census area',
-      ['Yukon-Koyukuk Census Area', 'yukon-koyukuk census area', 'YUKON-KOYUKUK CENSUS AREA'],
+      [
+        'Yukon-Koyukuk Census Area',
+        'yukon-koyukuk census area',
+        'YUKON-KOYUKUK CENSUS AREA',
+        'Yukon-Koyukuk (Census Area)',
+      ],
     ],
     [
       'st. john the baptist parish',
-      ['St. John the Baptist Parish', 'st. john the baptist parish', 'ST. JOHN THE BAPTIST PARISH'],
+      [
+        'St. John the Baptist Parish',
+        'st. john the baptist parish',
+        'ST. JOHN THE BAPTIST PARISH',
+        'St. John the Baptist (Parish)',
+      ],
     ],
     ['st. louis, city of', ['St. Louis, City of', 'st. louis, city of', 'ST. LOUIS, CITY OF']],
     [
@@ -203,7 +276,8 @@ describe('worst case over every input', () => {
   /**
    * Any input resolves to at most the stored forms of one lowercase string plus four fixed
    * variants (as given, lower, UPPER, Title): with these snapshot maxima, at most 8 county and
-   * 6 incident-type spellings.
+   * 6 incident-type spellings. A terminal county type adds at most four stored forms,
+   * so the county bound becomes 12, still below OpenFEMA's 100-level nesting limit.
    */
   it('the snapshot holds at most 4 stored forms of any county substring and 2 of any incident-type substring', () => {
     expect(mostStoredForms(countyVocabulary)).toBe(4); // "ap": ap, Ap, aP, AP
@@ -223,7 +297,9 @@ describe('worst case over every input', () => {
 it('reaches every combined stored county name in every case without changing substring semantics (#52)', () => {
   for (const stored of countyVocabulary) {
     for (const input of [stored, stored.toLowerCase(), stored.toUpperCase()]) {
-      expect(countySpellings(input).some((spelling) => stored.includes(spelling))).toBe(true);
+      const spellings = countySpellings(input);
+      expect(spellings.some((spelling) => stored.includes(spelling))).toBe(true);
+      expect(spellings.length).toBeLessThanOrEqual(12);
     }
   }
   const spellings = countySpellings('harris');
@@ -244,6 +320,31 @@ function cpuMs(fn: () => void): number {
 }
 
 describe('scan time on caller-sized input', () => {
+  it.each([
+    ['repeated openers', (n: number) => '('.repeat(n)],
+    [
+      'overlapping type prefixes',
+      (n: number) => 'County (County '.repeat(Math.ceil(n / 15)).slice(0, n),
+    ],
+    ['a long line ending in a newline', (n: number) => `${'x'.repeat(n)}\n`],
+    ['line breaks throughout', (n: number) => 'x\n'.repeat(n / 2)],
+    ['a plain suffix', (n: number) => `${'x'.repeat(n)} County`],
+    ['a parenthesized suffix', (n: number) => `${'x'.repeat(n)} (County)`],
+  ])('keeps suffix scanning bounded on %s (#58)', (_, make) => {
+    let first = 0;
+    for (const size of [5_000, 20_000, 80_000, 320_000]) {
+      const input = make(size);
+      const result = countySpellings(input);
+      expect(result).toContain(input.trim());
+      expect(result.length).toBeLessThanOrEqual(8);
+      const elapsed = cpuMs(() => {
+        for (let sample = 0; sample < 3; sample++) countySpellings(input);
+      });
+      if (size === 5_000) first = elapsed;
+      expect(elapsed).toBeLessThan(500);
+      expect(elapsed / Math.max(first, 0.05)).toBeLessThan(256);
+    }
+  });
   it.each([
     ['a digit run', (n: number) => '1'.repeat(n), 320_000],
     ['separators before every letter', (n: number) => 'a-'.repeat(n / 2), 80_000],

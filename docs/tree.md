@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-10-29 08:53:06
+Generated on: 2026-11-04 00:23:30
 
 ```text
 fema-mcp-server/
@@ -164,6 +164,7 @@ fema-mcp-server/
 │   │       │   ├── fema-query-dataset.tool.ts
 │   │       │   ├── fema-search-disasters.tool.ts
 │   │       │   └── fema-search-nfip.tool.ts
+│   │       ├── literal-markdown.ts
 │   │       ├── markdown-table.ts
 │   │       └── response-budget.ts
 │   ├── services/
@@ -181,7 +182,8 @@ fema-mcp-server/
 │   │   ├── canvas-provider-default.test.ts
 │   │   └── server-config.test.ts
 │   ├── helpers/
-│   │   └── openfema-fixtures.ts
+│   │   ├── openfema-fixtures.ts
+│   │   └── rendered-markdown.ts
 │   ├── prompts/
 │   ├── resources/
 │   │   └── fema-disaster.resource.test.ts
@@ -206,6 +208,8 @@ fema-mcp-server/
 │       ├── fema-search-disasters.upstream.test.ts
 │       ├── fema-search-nfip.tool.test.ts
 │       ├── fema-search-nfip.upstream.test.ts
+│       ├── literal-markdown.test.ts
+│       ├── literal-rendering.test.ts
 │       ├── markdown-table.test.ts
 │       └── response-budget.test.ts
 ├── .dockerignore

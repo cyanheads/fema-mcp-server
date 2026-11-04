@@ -55,7 +55,7 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
         select:
           'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
-          'ihProgramDeclared,paProgramDeclared,hmProgramDeclared',
+          'iaProgramDeclared,ihProgramDeclared,paProgramDeclared,hmProgramDeclared',
         top: 500,
       },
       ctx,
@@ -72,7 +72,8 @@ export const femaDisasterResource = resource('fema://disaster/{disasterNumber}',
     const first = rows[0]!;
     // OR program flags across all area-rows: declared for ANY area = declared for the disaster.
     const programs: string[] = [];
-    if (rows.some((r) => r.ihProgramDeclared === true)) programs.push('IA');
+    if (rows.some((r) => r.iaProgramDeclared === true || r.ihProgramDeclared === true))
+      programs.push('IA');
     if (rows.some((r) => r.paProgramDeclared === true)) programs.push('PA');
     if (rows.some((r) => r.hmProgramDeclared === true)) programs.push('HM');
 

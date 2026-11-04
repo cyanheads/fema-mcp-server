@@ -5,6 +5,13 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import {
+  renderJson,
+  renderLiteral,
+  renderNotice,
+  requiresJson,
+} from '@/mcp-server/tools/literal-markdown.js';
 import {
   continuationNotice,
   maxRowsWithinBudget,
@@ -51,9 +58,9 @@ interface RenterRecord extends AreaRecord {
 function areaLines(r: AreaRecord): string[] {
   const loc = [r.county, r.city, r.zip_code].filter(Boolean).join(', ');
   const lines = [
-    `### ${loc || `Disaster #${r.disaster_number}`}`,
+    `### ${loc ? literal(loc) : `Disaster #${r.disaster_number}`}`,
     r.state
-      ? `**State:** ${r.state} | **Disaster:** #${r.disaster_number}`
+      ? `**State:** ${literal(r.state)} | **Disaster:** #${r.disaster_number}`
       : `**Disaster:** #${r.disaster_number}`,
   ];
   if (r.valid_registrations != null) lines.push(`**Registrations:** ${r.valid_registrations}`);
@@ -141,7 +148,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       .string()
       .optional()
       .describe(
-        'Filter by county name (e.g., Harris, dekalb). Case-insensitive substring match: harris also matches Harrison. OpenFEMA stores the county with its type, such as Harris (County) or Evangeline (Parish), and as the applicant reported it.',
+        'Filter by county name (e.g., Harris, Harris County, Harris (County)). Case-insensitive substring match: bare harris also matches Harrison. Recognized terminal County, Parish, Borough, and Census Area forms match with or without parentheses, retaining the county name and type.',
       ),
     zip_code: z
       .union([
@@ -396,8 +403,14 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       ),
   },
   enrichmentTrailer: {
+    notice: { render: renderNotice },
     next_offset: { label: 'Next offset' },
-    county_filter: { label: 'County filter (case-insensitive substring)' },
+    county_filter: {
+      render: (value) =>
+        requiresJson(value)
+          ? `**County filter (case-insensitive substring):**\n\n${renderJson(value)}`
+          : `**County filter (case-insensitive substring):** ${renderLiteral(value)}`,
+    },
     zip_code_filter: { label: 'ZIP code filter' },
   },
   errors: [
@@ -553,7 +566,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       notice.push(
         `No IA housing records matched for disaster ${input.disaster_number}. ` +
           (filters.length > 0 ? `Broaden the search by removing ${filters.join(' or ')}. ` : '') +
-          'Check the declaration’s IA program with fema_get_disaster; housing data may take weeks to appear.',
+          'Check the declaration’s IA program with fema_get_disaster; IA designation does not guarantee housing records, and recent housing data may take weeks to appear.',
       );
     }
     if (pastEnd.length > 0) {
@@ -594,6 +607,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines = [
       `**Owner records:** ${result.owners.length} of ${result.owners_count}`,
       `**Renter records:** ${result.renters.length} of ${result.renters_count}`,

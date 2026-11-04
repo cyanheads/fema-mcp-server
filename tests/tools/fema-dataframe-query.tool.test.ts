@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaDataframeQuery } from '@/mcp-server/tools/definitions/fema-dataframe-query.tool.js';
+import { jsonFallback } from '../helpers/rendered-markdown.js';
 
 vi.mock('@/services/canvas/canvas-accessor.js', () => {
   let _canvas: unknown;
@@ -214,21 +215,14 @@ describe('femaDataframeQuery', () => {
     ]);
   });
 
-  it('renders structs and lists as compact JSON, null and "" distinctly, and escapes pipes and line breaks (#43)', () => {
+  it('preserves complete structs, lists and multiline cells through JSON fallback (#43, #67)', () => {
     const rows = [
       { loss: { county: '48201' }, note: 'a|b', n: null, e: '', arr: [1, 2], nl: 'line1\nline2' },
       { loss: { county: '48157' }, note: 'c', n: null, e: '', arr: [], nl: 'x\r\ny' },
     ];
     const blocks = femaDataframeQuery.format!({ rows, row_count: 2, canvas_id: 'Ab_012-xy9' });
     const text = (blocks[0] as { text: string }).text;
-    const lines = text.split('\n').filter((line) => line.startsWith('| '));
-    expect(lines).toEqual([
-      '| loss | note | n | e | arr | nl |',
-      '| --- | --- | --- | --- | --- | --- |',
-      '| {"county":"48201"} | a\\|b | null | "" | [1,2] | line1 line2 |',
-      '| {"county":"48157"} | c | null | "" | [] | x y |',
-    ]);
-    for (const line of lines) expect(line.split(/(?<!\\)\|/).slice(1, -1)).toHaveLength(6);
+    expect(jsonFallback(text)).toEqual({ rows, row_count: 2, canvas_id: 'Ab_012-xy9' });
     expect(text).not.toContain('[object Object]');
   });
 

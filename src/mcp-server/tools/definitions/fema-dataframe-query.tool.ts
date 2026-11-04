@@ -10,6 +10,8 @@ import {
   SQL_GATE_REASONS,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import { renderJson, renderNotice, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import { renderTableHeader, renderTableRow } from '@/mcp-server/tools/markdown-table.js';
 import { rowCharge, rowsWithinBudget } from '@/mcp-server/tools/response-budget.js';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
@@ -81,6 +83,9 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       .describe(
         'Continuation guidance when truncated — how far to advance OFFSET, and lower any LIMIT, under an ORDER BY, to page the remainder.',
       ),
+  },
+  enrichmentTrailer: {
+    notice: { render: renderNotice },
   },
   errors: [
     {
@@ -216,8 +221,9 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
-    lines.push(`**${result.row_count} rows** | Canvas: ${result.canvas_id}\n`);
+    lines.push(`**${result.row_count} rows** | Canvas: ${literal(result.canvas_id)}\n`);
     if (result.rows.length === 0) {
       lines.push('_No rows returned._');
     } else {

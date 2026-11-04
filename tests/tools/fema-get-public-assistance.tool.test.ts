@@ -9,6 +9,7 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 import { femaGetPublicAssistance } from '@/mcp-server/tools/definitions/fema-get-public-assistance.tool.js';
+import { jsonFallback, renderedText } from '../helpers/rendered-markdown.js';
 
 // Only the service accessor is stubbed: the county matcher runs the real escapeODataString.
 vi.mock('@/services/openfema/openfema-service.js', async (importOriginal) => {
@@ -50,6 +51,108 @@ function makePaRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('femaGetPublicAssistance', () => {
+  it('wires the shared suffix matcher and preserves literal project text on both surfaces (#58, #67)', async () => {
+    const title = '*title* <b>x</b> &amp;';
+    const fetchPaProjects = vi.fn().mockResolvedValue({
+      rows: [makePaRow({ applicationTitle: title, county: 'Harris County' })],
+      count: 1,
+    });
+    await setMock({ fetchPaProjects });
+    const result = await runToolContract(femaGetPublicAssistance, {
+      disaster_number: 4332,
+      county: 'harris (county)',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(fetchPaProjects.mock.calls[0]?.[0].filter).toContain(
+      "substringof('Harris County', county)",
+    );
+    expect(result.structuredContent).toMatchObject({
+      projects: [{ application_title: title, county: 'Harris County' }],
+    });
+    expect(renderedText(contentText(result))).toContain(title);
+  });
+  it('charges escaped headings while paging whole project rows (#67)', async () => {
+    const title = '*'.repeat(2000);
+    await setMock({
+      fetchPaProjects: vi.fn().mockResolvedValue({
+        rows: Array.from({ length: 100 }, () => ({
+          disasterNumber: 4332,
+          applicationTitle: title,
+        })),
+        count: 100,
+      }),
+    });
+    const result = await runToolContract(femaGetPublicAssistance, {
+      disaster_number: 4332,
+      limit: 100,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      returned_count: 24,
+      next_offset: 24,
+      projects: Array.from({ length: 24 }, () => ({
+        disaster_number: 4332,
+        application_title: title,
+      })),
+    });
+    expect(renderedText(contentText(result)).filter((line) => line === title)).toHaveLength(24);
+  });
+  it('keeps complete row identities across mixed-layout continuation and the last/past-end pages (#67)', async () => {
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      disasterNumber: 4332,
+      pwNumber: i + 1,
+      applicationTitle: '*'.repeat(2000) + (i === 0 ? '\n' : ''),
+    }));
+    await setMock({
+      fetchPaProjects: vi
+        .fn()
+        .mockImplementation(async ({ skip, top }: { skip: number; top: number }) => ({
+          rows: rows.slice(skip, skip + top),
+          count: 100,
+        })),
+    });
+    const first = await runToolContract(femaGetPublicAssistance, {
+      disaster_number: 4332,
+      limit: 100,
+    });
+    const second = await runToolContract(femaGetPublicAssistance, {
+      disaster_number: 4332,
+      limit: 100,
+      offset: 25,
+    });
+    const firstData = first.structuredContent as {
+      projects: Array<{ pw_number: number }>;
+      next_offset: number;
+    };
+    const secondData = second.structuredContent as {
+      projects: Array<{ pw_number: number }>;
+      next_offset: number;
+    };
+    expect(firstData.next_offset).toBe(25);
+    expect(secondData.next_offset).toBe(49);
+    expect([...firstData.projects, ...secondData.projects].map((p) => p.pw_number)).toEqual(
+      Array.from({ length: 49 }, (_, i) => i + 1),
+    );
+    expect(jsonFallback((first.content[0] as { text: string }).text)).toMatchObject({
+      projects: firstData.projects,
+    });
+    for (const [offset, returned] of [
+      [99, 1],
+      [100, 0],
+    ]) {
+      const result = await runToolContract(femaGetPublicAssistance, {
+        disaster_number: 4332,
+        limit: 100,
+        offset,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        returned_count: returned,
+        total_count: 100,
+      });
+      expect(result.structuredContent).not.toHaveProperty('next_offset');
+    }
+  });
   beforeEach(async () => {
     await setMock({
       fetchPaProjects: vi.fn().mockResolvedValue({
@@ -467,10 +570,8 @@ describe('femaGetPublicAssistance — response budget and next_offset (#46)', ()
       expect(structured.notice).toBe(
         `Returned ${projects.length} of the 8000 matching PA projects from offset 0, the most that fit the 100,000-character response budget; continue with offset ${projects.length}.`,
       );
-      const content = contentText(result);
-      expect(
-        content.slice(content.indexOf('## '), content.indexOf('\n> ')).length,
-      ).toBeLessThanOrEqual(BUDGET);
+      const content = (result.content[0] as { text: string }).text;
+      expect(content.slice(content.indexOf('## ')).length).toBeLessThanOrEqual(BUDGET);
       /**
        * Projects past the most any page could hold are never requested. The cheapest project
        * carries only its disaster number and renders as "## PW-unknown\n**Disaster:** #0"

@@ -5,30 +5,14 @@
  * @module mcp-server/tools/markdown-table
  */
 
-/**
- * `|` as `\|`, with the backslashes directly before it doubled (`a\|b` → `a\\\|b`). GFM parsers
- * treat a pipe after an even run of backslashes as a cell boundary, so a value's own backslash
- * would otherwise unescape the pipe and add a cell. A loop rather than a regex keeps a long
- * backslash run linear.
- */
-function escapePipes(text: string): string {
-  const parts = text.split('|');
-  const last = parts.length - 1;
-  return parts
-    .map((part, i) => {
-      if (i === last) return part;
-      let run = 0;
-      while (part[part.length - 1 - run] === '\\') run++;
-      return part + '\\'.repeat(run);
-    })
-    .join('\\|');
-}
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { requiresJson } from './literal-markdown.js';
 
 /**
  * Text of one table cell. Objects and arrays render as compact JSON, `null` as `null`,
  * an empty string as `""`, and an absent value (a record without the column) as an empty
- * cell. `|` is escaped as `\|` and each CR, LF, or CRLF becomes one space, so a value can
- * neither split its cell nor its row.
+ * cell. Markdown syntax is literal. Unsafe strings use JSON notation here; complete
+ * tool results containing them use the fenced JSON fallback instead of a table.
  */
 export function formatTableCell(value: unknown): string {
   if (value === undefined) return '';
@@ -39,7 +23,9 @@ export function formatTableCell(value: unknown): string {
       : value !== null && typeof value === 'object'
         ? JSON.stringify(value)
         : String(value);
-  return escapePipes(text.replace(/\r\n?|\n/g, ' '));
+  return escapeMarkdownInline(
+    typeof value === 'string' && requiresJson(value) ? JSON.stringify(value) : text,
+  );
 }
 
 /** Header line and `---` separator line for a fixed column list. */

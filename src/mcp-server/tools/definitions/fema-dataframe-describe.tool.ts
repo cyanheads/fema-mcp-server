@@ -6,6 +6,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import { renderJson, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 
 export const femaDataframeDescribe = tool('fema_dataframe_describe', {
@@ -116,14 +118,15 @@ export const femaDataframeDescribe = tool('fema_dataframe_describe', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
-    lines.push(`**Canvas:** ${result.canvas_id} | **${result.tables.length} table(s)**\n`);
+    lines.push(`**Canvas:** ${literal(result.canvas_id)} | **${result.tables.length} table(s)**\n`);
     for (const t of result.tables) {
-      lines.push(`## ${t.name} (${t.kind}, ${t.row_count} rows)`);
+      lines.push(`## ${literal(t.name)} (${literal(t.kind)}, ${t.row_count} rows)`);
       lines.push(`| Column | Type | Nullable |`);
       lines.push(`| --- | --- | --- |`);
       for (const c of t.columns) {
-        lines.push(`| ${c.name} | ${c.type} | ${c.nullable ?? 'unknown'} |`);
+        lines.push(`| ${literal(c.name)} | ${literal(c.type)} | ${c.nullable ?? 'unknown'} |`);
       }
       lines.push('');
     }

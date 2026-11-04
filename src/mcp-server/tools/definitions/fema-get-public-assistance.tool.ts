@@ -5,6 +5,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import { renderJson, renderNotice, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import {
   continuationNotice,
   maxRowsWithinBudget,
@@ -37,12 +39,12 @@ interface Project {
 function renderProject(p: Project): string {
   const lines: string[] = [];
   const title = p.application_title ?? `PW-${p.pw_number ?? 'unknown'}`;
-  lines.push(`## ${title}`);
+  lines.push(`## ${literal(title)}`);
   lines.push(`**Disaster:** #${p.disaster_number}`);
-  if (p.applicant_id) lines.push(`**Applicant ID:** ${p.applicant_id}`);
+  if (p.applicant_id) lines.push(`**Applicant ID:** ${literal(p.applicant_id)}`);
   if (p.damage_category_code) {
     lines.push(
-      `**Damage Category:** ${p.damage_category_code}${p.damage_category_description ? ` — ${p.damage_category_description}` : ''}`,
+      `**Damage Category:** ${literal(p.damage_category_code)}${p.damage_category_description ? ` — ${literal(p.damage_category_description)}` : ''}`,
     );
   }
   if (p.total_obligated != null) {
@@ -55,13 +57,14 @@ function renderProject(p: Project): string {
     lines.push(`**Project Amount:** $${p.project_amount.toLocaleString()}`);
   }
   const meta: string[] = [];
-  if (p.project_status) meta.push(`Status: ${p.project_status}`);
-  if (p.project_size) meta.push(`Size: ${p.project_size}`);
-  if (p.county) meta.push(`County: ${p.county}`);
-  if (p.state) meta.push(`State: ${p.state}`);
+  if (p.project_status) meta.push(`Status: ${literal(p.project_status)}`);
+  if (p.project_size) meta.push(`Size: ${literal(p.project_size)}`);
+  if (p.county) meta.push(`County: ${literal(p.county)}`);
+  if (p.state) meta.push(`State: ${literal(p.state)}`);
   if (p.pw_number) meta.push(`PW: ${p.pw_number}`);
   if (meta.length > 0) lines.push(meta.join(' | '));
-  if (p.first_obligation_date) lines.push(`**First Obligated:** ${p.first_obligation_date}`);
+  if (p.first_obligation_date)
+    lines.push(`**First Obligated:** ${literal(p.first_obligation_date)}`);
   return lines.join('\n');
 }
 
@@ -99,7 +102,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       .string()
       .optional()
       .describe(
-        'Filter by county name (e.g., Harris, dekalb). Case-insensitive substring match: harris also matches Harrison.',
+        'Filter by county name (e.g., Harris, dekalb). Case-insensitive substring match: harris also matches Harrison. Recognized terminal County, Parish, Borough, and Census Area names accept plain or parenthesized types; unknown names retain original case fallbacks.',
       ),
     limit: z
       .number()
@@ -223,6 +226,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       ),
   },
   enrichmentTrailer: {
+    notice: { render: renderNotice },
     next_offset: { label: 'Next offset' },
   },
   errors: [
@@ -358,6 +362,7 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
     lines.push(`**${result.returned_count} of ${result.total_count} PA projects**\n`);
     for (const p of result.projects) lines.push(renderProject(p), '');

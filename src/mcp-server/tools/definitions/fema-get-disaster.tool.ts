@@ -5,6 +5,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import { renderJson, renderNotice, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 
 export const femaGetDisaster = tool('fema_get_disaster', {
@@ -14,7 +16,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     'Discloses partial area and program coverage when more rows exist. Returns counties/municipalities along with programs observed, ' +
     'incident period, and state info. Use fema_search_disasters to find disaster numbers. ' +
     'The returned disaster_number chains to fema_get_public_assistance and fema_get_housing_assistance.',
-  annotations: { readOnlyHint: true, openWorldHint: false },
+  annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     disaster_number: z
       .number()
@@ -44,7 +46,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     ia_declared: z
       .boolean()
       .describe(
-        'True when IHP was declared in a fetched row. When areas_truncated is true, false does not exclude IHP in unfetched rows.',
+        'True when legacy IA or IHP was declared in a fetched row. Does not guarantee housing records. When areas_truncated is true, false does not exclude IA in unfetched rows.',
       ),
     pa_declared: z
       .boolean()
@@ -61,6 +63,11 @@ export const femaGetDisaster = tool('fema_get_disaster', {
         z
           .object({
             area: z.string().describe('Name of the designated county or municipality.'),
+            ia_declared: z
+              .boolean()
+              .describe('True when legacy IA or IHP was declared for this area.'),
+            pa_declared: z.boolean().describe('True when PA was declared for this area.'),
+            hm_declared: z.boolean().describe('True when HM was declared for this area.'),
             fips_state_code: z
               .string()
               .optional()
@@ -95,6 +102,9 @@ export const femaGetDisaster = tool('fema_get_disaster', {
         'Returned/total area counts and partial program evidence, with the dataset tool for full rows.',
       ),
   },
+  enrichmentTrailer: {
+    notice: { render: renderNotice },
+  },
   errors: [
     {
       reason: 'not_found',
@@ -125,7 +135,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
         select:
           'disasterNumber,declarationTitle,state,incidentType,declarationType,' +
           'declarationDate,incidentBeginDate,incidentEndDate,' +
-          'ihProgramDeclared,paProgramDeclared,hmProgramDeclared,' +
+          'iaProgramDeclared,ihProgramDeclared,paProgramDeclared,hmProgramDeclared,' +
           'designatedArea,fipsStateCode,fipsCountyCode',
         top: 1000,
       },
@@ -144,13 +154,17 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     const first = rows[0]!;
     const designatedAreas = rows.map((r) => ({
       area: r.designatedArea ?? 'Unknown',
+      ia_declared: r.iaProgramDeclared === true || r.ihProgramDeclared === true,
+      pa_declared: r.paProgramDeclared === true,
+      hm_declared: r.hmProgramDeclared === true,
       ...(r.fipsStateCode ? { fips_state_code: r.fipsStateCode } : {}),
       ...(r.fipsCountyCode ? { fips_county_code: r.fipsCountyCode } : {}),
     }));
 
-    // OR program flags across all area-rows: ihProgramDeclared may be false on some
-    // rows and true on others for the same disaster — declared for ANY area = declared.
-    const ia_declared = rows.some((r) => r.ihProgramDeclared === true);
+    // Either IA program in any fetched area establishes IA; unfetched rows remain unknown.
+    const ia_declared = rows.some(
+      (r) => r.iaProgramDeclared === true || r.ihProgramDeclared === true,
+    );
     const pa_declared = rows.some((r) => r.paProgramDeclared === true);
     const hm_declared = rows.some((r) => r.hmProgramDeclared === true);
     const partial = count > rows.length;
@@ -184,18 +198,19 @@ export const femaGetDisaster = tool('fema_get_disaster', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
     const label = result.declaration_type
       ? `${result.declaration_type}-${result.disaster_number}`
       : `Disaster #${result.disaster_number}`;
-    lines.push(`# ${label} — ${result.title}`);
+    lines.push(`# ${literal(label)} — ${literal(result.title)}`);
     lines.push(
-      `**State:** ${result.state} | **Type:** ${result.declaration_type} | **Incident:** ${result.incident_type}`,
+      `**State:** ${literal(result.state)} | **Type:** ${literal(result.declaration_type)} | **Incident:** ${literal(result.incident_type)}`,
     );
-    lines.push(`**Declared:** ${result.declaration_date}`);
+    lines.push(`**Declared:** ${literal(result.declaration_date)}`);
     if (result.incident_begin_date) {
       lines.push(
-        `**Incident Period:** ${result.incident_begin_date}${result.incident_end_date ? ` → ${result.incident_end_date}` : ' (ongoing)'}`,
+        `**Incident Period:** ${literal(result.incident_begin_date)}${result.incident_end_date ? ` → ${literal(result.incident_end_date)}` : ' (ongoing)'}`,
       );
     }
     const programs: string[] = [];
@@ -212,9 +227,15 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     for (const area of result.designated_areas) {
       const fips =
         area.fips_state_code && area.fips_county_code
-          ? ` (FIPS ${area.fips_state_code}${area.fips_county_code})`
+          ? ` (FIPS ${literal(area.fips_state_code + area.fips_county_code)})`
           : '';
-      lines.push(`- ${area.area}${fips}`);
+      const areaPrograms: string[] = [];
+      if (area.ia_declared) areaPrograms.push('IA');
+      if (area.pa_declared) areaPrograms.push('PA');
+      if (area.hm_declared) areaPrograms.push('HM');
+      lines.push(
+        `- ${literal(area.area)}${fips} — ${areaPrograms.length ? areaPrograms.join(', ') : 'None'}`,
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

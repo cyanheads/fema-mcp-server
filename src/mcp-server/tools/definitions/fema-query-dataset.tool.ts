@@ -6,6 +6,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import { renderJson, renderNotice, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import { renderTableHeader, renderTableRow } from '@/mcp-server/tools/markdown-table.js';
 import {
   continuationNotice,
@@ -147,6 +149,7 @@ export const femaQueryDataset = tool('fema_query_dataset', {
       ),
   },
   enrichmentTrailer: {
+    notice: { render: renderNotice },
     next_offset: { label: 'Next offset' },
   },
   errors: [
@@ -361,9 +364,10 @@ export const femaQueryDataset = tool('fema_query_dataset', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
     lines.push(
-      `**${result.returned_count} of ${result.total_count} records** from \`${result.dataset}\`\n`,
+      `**${result.returned_count} of ${result.total_count} records** from ${literal(result.dataset)}\n`,
     );
     if (result.rows.length === 0) {
       lines.push(

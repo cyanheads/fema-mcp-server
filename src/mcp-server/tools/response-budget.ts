@@ -5,16 +5,21 @@
  * @module mcp-server/tools/response-budget
  */
 
+import { requiresJson } from './literal-markdown.js';
+
 /** Characters of rows one response holds on each surface (~25k tokens). */
 export const RESPONSE_BUDGET_CHARS = 100_000;
 
 /**
- * What one row costs: the larger of its JSON (`structuredContent`) and the text `format()`
- * renders for it (`content[]`), plus two for the separator either surface puts between rows —
- * a comma, a line break, or a blank line.
+ * What one row costs: its compact JSON when the result requires a JSON fallback, otherwise
+ * the larger of its JSON and escaped Markdown. Add two for the row separator on either
+ * surface — a comma, line break, or blank line. Safe rows on a mixed page retain the
+ * conservative Markdown charge even when another row forces JSON for the whole result.
+ * This remains a row budget, not an envelope cap.
  */
 export function rowCharge(row: unknown, text: string): number {
-  return Math.max(JSON.stringify(row).length, text.length) + 2;
+  const jsonLength = JSON.stringify(row).length;
+  return (requiresJson(row) ? jsonLength : Math.max(jsonLength, text.length)) + 2;
 }
 
 /**

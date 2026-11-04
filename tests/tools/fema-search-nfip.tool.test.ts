@@ -29,6 +29,7 @@ import {
   jsonResponse,
   routeFetch,
 } from '../helpers/openfema-fixtures.js';
+import { renderedText } from '../helpers/rendered-markdown.js';
 
 const NFIP_V3 = endpoint('NfipClaims', 3);
 const SELECT =
@@ -663,6 +664,66 @@ describe('fema_search_nfip — county_code forms and the year range (#45)', () =
 });
 
 describe('fema_search_nfip — canvas disabled', () => {
+  it.each([
+    { enabled: false, total: 2, spilled: false },
+    { enabled: true, total: 1, spilled: false },
+    { enabled: true, total: 2, spilled: true },
+  ])(
+    'returns an oversized escaped first row whole (canvas=$enabled, total=$total)',
+    async ({ enabled, total, spilled }) => {
+      const zone = '*'.repeat(60_000);
+      if (enabled) useCanvas();
+      fetchMock.mockImplementation(
+        nfipMatch(total, { row: (i) => ({ ...claim(i), ratedFloodZone: zone }) }),
+      );
+      const first = await search({ limit: 2 });
+      expect(first.isError).not.toBe(true);
+      expect(out(first)).toMatchObject({ returned_count: 1, total_count: total, spilled });
+      expect(ids(out(first))).toEqual([0]);
+      expect(out(first).claims[0]?.rated_flood_zone).toBe(zone);
+      expect(renderedText((first.content[0] as { text: string }).text).join('\n')).toContain(zone);
+      if (total === 1) {
+        expect(out(first).next_offset).toBeUndefined();
+      } else {
+        expect(out(first).next_offset).toBe(1);
+        const second = await search({ limit: 2, offset: out(first).next_offset });
+        expect(second.isError).not.toBe(true);
+        expect(out(second)).toMatchObject({ returned_count: 1, spilled: false });
+        expect(ids(out(second))).toEqual([1]);
+        expect(out(second).next_offset).toBeUndefined();
+      }
+    },
+  );
+  it('charges escaped claim text before choosing an inline page (#67)', async () => {
+    const zone = '*'.repeat(2000);
+    fetchMock.mockImplementation(
+      routeFetch([
+        [
+          NFIP_V3,
+          () =>
+            envelopeResponse(
+              'NfipClaims',
+              Array.from({ length: 100 }, (_, i) => ({ ...claim(i), ratedFloodZone: zone })),
+              100,
+              'v3',
+            ),
+        ],
+      ]),
+    );
+    const result = await search({ limit: 100 });
+    expect(result.isError).not.toBe(true);
+    const data = out(result);
+    expect(data.next_offset).toBe(data.returned_count);
+    expect(data.claims?.every((c) => c.rated_flood_zone === zone)).toBe(true);
+    const domain = (result.content[0] as { text: string }).text;
+    expect(
+      domain
+        .split('\n')
+        .filter((line) => line.startsWith('State:'))
+        .join('\n').length,
+    ).toBeLessThanOrEqual(100000);
+    expect(renderedText(domain).join('\n')).toContain(zone);
+  });
   it('pages a 187-claim match with limit 100 at offsets 0 and 100, every claim exactly once', async () => {
     fetchMock.mockImplementation(nfipMatch(187));
     const first = await search({ limit: 100, offset: 0 });
@@ -940,7 +1001,7 @@ describe('fema_search_nfip — canvas enabled, match overflows the preview', () 
       'List its columns with fema_dataframe_describe, then run SQL on it with fema_dataframe_query. ' +
       'The first 5 of them are inline here; read the rest from the canvas table.';
     expect(o.notice).toBe(notice);
-    expect(text(result)).toContain(notice);
+    expect(renderedText(text(result))).toContain(notice);
     const body = text(result);
     expect(body.indexOf('fema_dataframe_describe')).toBeLessThan(
       body.indexOf('fema_dataframe_query'),
@@ -1148,7 +1209,7 @@ describe('fema_search_nfip — canvas enabled, match overflows the preview', () 
       `the table holds ${MAX_CANVAS_ROWS} of the 93589 matching claims`,
     );
     expect(o.notice).toContain('7 claims in TX (2017–2017)');
-    expect(text(result)).toContain(o.notice);
+    expect(renderedText(text(result))).toContain(o.notice);
     // Pages stop at the cap: nothing past row 50,000 is requested.
     expect(
       calledUrls(fetchMock)

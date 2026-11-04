@@ -35,7 +35,7 @@ function makeAreaRow(overrides: Record<string, unknown> = {}) {
     declarationDate: '2024-09-27T00:00:00.000Z',
     incidentBeginDate: '2024-09-26T00:00:00.000Z',
     incidentEndDate: '2024-09-28T00:00:00.000Z',
-    ihProgramDeclared: true, // IHP flag (correct); iaProgramDeclared is legacy/false for major disasters
+    ihProgramDeclared: true,
     paProgramDeclared: true,
     hmProgramDeclared: false,
     designatedArea: 'Harris County',
@@ -46,6 +46,81 @@ function makeAreaRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('femaGetDisaster', () => {
+  it('renders each area designation, including legacy IA and no programs (#60)', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [
+          makeAreaRow({
+            designatedArea: 'Bexar (County)',
+            fipsCountyCode: '029',
+            ihProgramDeclared: false,
+            paProgramDeclared: true,
+            hmProgramDeclared: true,
+          }),
+          makeAreaRow({
+            designatedArea: 'Harris (County)',
+            iaProgramDeclared: true,
+            ihProgramDeclared: false,
+            hmProgramDeclared: true,
+          }),
+          makeAreaRow({
+            designatedArea: 'Sparse area',
+            fipsStateCode: undefined,
+            fipsCountyCode: undefined,
+            ihProgramDeclared: false,
+            paProgramDeclared: false,
+            hmProgramDeclared: false,
+          }),
+        ],
+        count: 3,
+      }),
+    });
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4332 });
+    expect(result.structuredContent).toMatchObject({
+      designated_areas: [
+        { ia_declared: false, pa_declared: true, hm_declared: true },
+        { ia_declared: true, pa_declared: true, hm_declared: true },
+        { ia_declared: false, pa_declared: false, hm_declared: false },
+      ],
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain('- Bexar (County) (FIPS 48029) — PA, HM');
+    expect(text).toContain('- Harris (County) (FIPS 48201) — IA, PA, HM');
+    expect(text).toContain('- Sparse area — None');
+    expect(femaGetDisaster.annotations?.openWorldHint).toBe(true);
+  });
+  it('reports legacy-only IA on both surfaces (#57)', async () => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({
+        rows: [makeAreaRow({ iaProgramDeclared: true, ihProgramDeclared: false })],
+        count: 1,
+      }),
+    });
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 1379 });
+    expect(result.structuredContent).toMatchObject({ ia_declared: true });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('Individual Assistance (IA)') }),
+      ]),
+    );
+  });
+  it('characterizes modern IHP-only declarations on both surfaces', async () => {
+    const fetchDisasters = vi.fn().mockResolvedValue({
+      rows: [makeAreaRow({ iaProgramDeclared: false, ihProgramDeclared: true })],
+      count: 1,
+    });
+    await setMock({ fetchDisasters });
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4781 });
+    expect(result.structuredContent).toMatchObject({ ia_declared: true, designated_area_count: 1 });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('Individual Assistance (IA)') }),
+      ]),
+    );
+    expect(fetchDisasters).toHaveBeenCalledTimes(1);
+  });
   it.each([9999, 32768])(
     'retains not_found code and recovery on both surfaces for %s (#54)',
     async (disaster_number) => {
@@ -145,13 +220,13 @@ describe('femaGetDisaster', () => {
     expect(result.pa_declared).toBe(true);
   });
 
-  it('ia_declared reflects ihProgramDeclared (IHP flag), not iaProgramDeclared', async () => {
+  it('retains modern IHP-only IA when the legacy flag is false', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({
         rows: [
           makeAreaRow({
             ihProgramDeclared: true,
-            iaProgramDeclared: false, // legacy flag — should NOT be used
+            iaProgramDeclared: false,
           }),
         ],
         count: 1,
@@ -251,7 +326,16 @@ describe('femaGetDisaster', () => {
       ia_declared: true,
       pa_declared: false,
       hm_declared: false,
-      designated_areas: [{ area: 'Harris County', fips_state_code: '48', fips_county_code: '201' }],
+      designated_areas: [
+        {
+          area: 'Harris County',
+          fips_state_code: '48',
+          fips_county_code: '201',
+          ia_declared: true,
+          pa_declared: false,
+          hm_declared: false,
+        },
+      ],
       designated_area_count: 1,
     };
     const blocks = femaGetDisaster.format!(output);
@@ -279,7 +363,9 @@ describe('femaGetDisaster', () => {
         ia_declared: false,
         pa_declared: false,
         hm_declared: false,
-        designated_areas: [{ area: 'Harris County' }],
+        designated_areas: [
+          { area: 'Harris County', ia_declared: false, pa_declared: true, hm_declared: false },
+        ],
         designated_area_count: 1,
       };
       const text = (femaGetDisaster.format!(output)[0] as { text: string }).text;
@@ -299,7 +385,9 @@ describe('femaGetDisaster', () => {
       ia_declared: false,
       pa_declared: false,
       hm_declared: false,
-      designated_areas: [{ area: 'Los Angeles County' }],
+      designated_areas: [
+        { area: 'Los Angeles County', ia_declared: false, pa_declared: true, hm_declared: false },
+      ],
       designated_area_count: 1,
     };
     const text = (femaGetDisaster.format!(output)[0] as { text: string }).text;

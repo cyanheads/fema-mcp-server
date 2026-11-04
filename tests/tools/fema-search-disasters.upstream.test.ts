@@ -163,6 +163,36 @@ afterEach(() => {
 });
 
 describe('fema_search_disasters — under the 10,000-row window', () => {
+  it('preserves the escaped title clause through encoded requests and offset pages (#64)', async () => {
+    const all = [
+      ...declarationRows(4345, '2017-10-16', 2),
+      ...declarationRows(4332, '2017-08-25', 3),
+    ];
+    fetchMock.mockImplementation(
+      routeFetch([
+        [
+          endpoint(DDS, 2),
+          (url) => {
+            expect(new URL(url).searchParams.get('$filter')).toBe(
+              "substringof('O''BRIEN', declarationTitle)",
+            );
+            return ddsServer(all)(url);
+          },
+        ],
+      ]),
+    );
+    for (const [offset, numbers] of [
+      [0, [4345]],
+      [1, [4332]],
+      [2, []],
+    ] as const) {
+      const { out, text } = await search({ title: " o'brien ", limit: 1, offset });
+      expect(out.declarations.map((d) => d.disaster_number)).toEqual(numbers);
+      expect(out.total_declarations).toBe(2);
+      if (offset < 2) expect(text).toContain(`DR-${numbers[0]}`);
+      else expect(text).toContain('last valid offset is 1');
+    }
+  });
   it('pages whole declarations with exact totals and no caveat on either surface', async () => {
     const all = [
       ...declarationRows(4782, '2024-09-27', 3),
@@ -248,23 +278,27 @@ describe('fema_search_disasters — under the 10,000-row window', () => {
     );
   });
 
-  it('a county value that pushes the URL past the CDN limit → request_too_long with this tool’s hint (#48)', async () => {
-    fetchMock.mockImplementation(routeFetch([[endpoint(DDS, 2), () => cdnBadRequestResponse()]]));
-    const result = await runToolContract(femaSearchDisasters, { county: 'x'.repeat(3_000) });
-    expect(result.isError).toBe(true);
-    const error = (
-      result.structuredContent as {
-        error: { code: number; data: { reason: string; recovery: { hint: string } } };
-      }
-    ).error;
-    const declared = femaSearchDisasters.errors?.find((e) => e.reason === 'request_too_long');
-    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(error.data.reason).toBe('request_too_long');
-    expect(error.data.recovery.hint).toBe(declared?.recovery);
-    expect(contentText(result)).toContain(declared?.recovery ?? '');
-    expect(contentText(result)).not.toMatch(/not found at OpenFEMA/);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+  it.each(['county', 'title'])(
+    'a long %s value → request_too_long with this tool’s hint (#48, #64)',
+    async (field) => {
+      fetchMock.mockImplementation(routeFetch([[endpoint(DDS, 2), () => cdnBadRequestResponse()]]));
+      const result = await runToolContract(femaSearchDisasters, { [field]: 'x'.repeat(10_000) });
+      expect(result.isError).toBe(true);
+      const error = (
+        result.structuredContent as {
+          error: { code: number; data: { reason: string; recovery: { hint: string } } };
+        }
+      ).error;
+      const declared = femaSearchDisasters.errors?.find((e) => e.reason === 'request_too_long');
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data.reason).toBe('request_too_long');
+      expect(error.data.recovery.hint).toContain('title');
+      expect(error.data.recovery.hint).toBe(declared?.recovery);
+      expect(contentText(result)).toContain(declared?.recovery ?? '');
+      expect(contentText(result)).not.toMatch(/not found at OpenFEMA/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe('fema_search_disasters — past the 10,000-row window (#21)', () => {
@@ -508,10 +542,28 @@ describe('fema_search_disasters — county keeps declaration-level totals (#42)'
     const followUp = new URL(urls[1] ?? '');
     expect(followUp.searchParams.get('$filter')).toBe('disasterNumber in (4332,4331)');
     expect(followUp.searchParams.get('$select')).toBe(
-      'disasterNumber,ihProgramDeclared,paProgramDeclared,hmProgramDeclared',
+      'disasterNumber,iaProgramDeclared,ihProgramDeclared,paProgramDeclared,hmProgramDeclared',
     );
     expect(followUp.searchParams.get('$orderby')).toBe('id');
     expect(followUp.searchParams.get('$top')).toBe('10000');
+  });
+
+  it('finds legacy IA beyond the first full-area page (#57)', async () => {
+    const all = withAreas(1379, '2001-06-09', 12_500).map((row, i) => ({
+      ...row,
+      ihProgramDeclared: false,
+      iaProgramDeclared: i === 12_499,
+    }));
+    const { out, text } = await countySearch(all, { county: 'Bexar' });
+    expect(out.declarations[0]).toMatchObject({
+      ia_declared: true,
+      designated_area_count: 12_500,
+      matched_areas: [expect.objectContaining({ ia_declared: false })],
+    });
+    expect(text).toContain('**Programs:** IA, PA, HM');
+    expect(calledUrls(fetchMock)).toHaveLength(3);
+    for (const url of calledUrls(fetchMock))
+      expect(new URL(url).searchParams.get('$select')).toContain('iaProgramDeclared');
   });
 
   it('reads only the returned page’s declarations', async () => {

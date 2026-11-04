@@ -9,6 +9,7 @@ import MarkdownIt from 'markdown-it';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 import { femaGetHousingAssistance } from '@/mcp-server/tools/definitions/fema-get-housing-assistance.tool.js';
+import { markdown, renderedText } from '../helpers/rendered-markdown.js';
 
 // Only the service accessor is stubbed: the county matcher runs the real escapeODataString.
 vi.mock('@/services/openfema/openfema-service.js', async (importOriginal) => {
@@ -257,6 +258,46 @@ function errorOf(result: { structuredContent?: unknown }): ErrorEnvelope {
 }
 
 describe('femaGetHousingAssistance — filters reaching OpenFEMA', () => {
+  it('wires suffix matching into both housing datasets (#58)', async () => {
+    const fetchHousingAssistance = vi.fn().mockResolvedValue({ rows: [], count: 0 });
+    await setMock({ fetchHousingAssistance });
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4332,
+      county: 'harris county',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(fetchHousingAssistance).toHaveBeenCalledTimes(2);
+    for (const call of fetchHousingAssistance.mock.calls)
+      expect(call[1].filter).toContain("substringof('Harris (County)', county)");
+  });
+  it.each(['*county* <b>x</b> &amp;', 'line1\r\nline2'])(
+    'preserves raw county %j independently in enrichment (#67)',
+    async (county) => {
+      await setMock({ fetchHousingAssistance: vi.fn().mockResolvedValue({ rows: [], count: 0 }) });
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 4332,
+        county,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        county_filter: county,
+        notice: expect.stringContaining(county),
+      });
+      const data = result.structuredContent as { notice: string };
+      const text = contentText(result);
+      if (county.includes('\r')) {
+        const values = markdown
+          .parse(text, {})
+          .filter((token) => token.type === 'fence')
+          .map((token) => JSON.parse(token.content));
+        expect(values).toEqual([county, data.notice]);
+      } else {
+        const parsed = renderedText(text).join('\n');
+        expect(parsed).toContain(data.notice);
+        expect(parsed).toContain(`County filter (case-insensitive substring): ${county}`);
+      }
+    },
+  );
   it('passes disaster number 32767, the top of the FEMA range, to both datasets', async () => {
     const fetchHousingAssistance: Mock = vi.fn().mockResolvedValue({
       rows: [makeOwnerRow({ disasterNumber: 32767 })],
@@ -297,6 +338,7 @@ describe('femaGetHousingAssistance — empty match', () => {
           notice: expect.stringContaining('fema_get_disaster'),
         });
         expect(contentText(result)).toContain('No IA housing records matched for disaster 9999.');
+        expect(contentText(result)).toContain('IA designation does not guarantee housing records');
         expect(contentText(result)).not.toMatch(/last valid offset|ZIP|county/);
         expect(result.structuredContent).not.toHaveProperty('next_offset');
       }

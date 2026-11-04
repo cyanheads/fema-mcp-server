@@ -35,8 +35,8 @@ Federal disaster recovery data from FEMA: disaster declarations, public assistan
 
 | Tool | Description |
 |:---|:---|
-| `fema_search_disasters` | Search federal disaster declarations by state, incident type, declaration type, date range, and county |
-| `fema_get_disaster` | Fetch up to 1,000 designated-area records for a specific disaster, with partial-coverage disclosure |
+| `fema_search_disasters` | Search federal disaster declarations by title, state, incident type, declaration type, date range, and county |
+| `fema_get_disaster` | Fetch up to 1,000 designated-area records with per-area program flags and partial-coverage disclosure |
 | `fema_get_public_assistance` | Public assistance funded projects for a disaster or state — where federal recovery money went |
 | `fema_get_housing_assistance` | Individual assistance housing data for a disaster — owner and renter breakdowns and inspection counts by county/ZIP, filterable by county or ZIP |
 | `fema_search_nfip` | NFIP flood insurance claims for a state, county, or ZIP, with DataCanvas spillover for SQL analytics |
@@ -67,16 +67,18 @@ Plugin installs pick up the root `skills/` tree; MCP clients that support the Sk
 
 ### `fema_search_disasters` <sub>tool</sub>
 
-- Filters: `state`, `incident_type`, `declaration_type` (`DR`/`EM`/`FM`), inclusive `date_from`/`date_to` (`YYYY-MM-DD`), and `county`. `incident_type` and `county` are case-insensitive substring matches. Page with `limit` (1–1000, default 50) and `offset`; a page stops at 100,000 characters and `next_offset` says where to resume.
+- Filters: `title`, `state`, `incident_type`, `declaration_type` (`DR`/`EM`/`FM`), inclusive `date_from`/`date_to` (`YYYY-MM-DD`), and `county`. `title`, `incident_type`, and `county` are case-insensitive substring matches. A title such as `harvey` also matches unrelated names such as HARVEYTOWN FIRE. Page with `limit` (1–1000, default 50) and `offset`; a page stops at 100,000 characters and `next_offset` says where to resume.
 - Returns one summary per disaster number with `designated_area_count`, program flags, and declaration totals. With `county`, `total_area_rows` and `matched_areas` (FIPS codes and per-area flags) show the matching areas. Errors: `invalid_state`, `invalid_range` (`date_from` after `date_to`), `request_too_long`.
 - Searches the most recent 10,000 designated-area rows. When capped, results are marked `truncated`, totals are lower bounds, and `notice` names the next `date_to`.
+
+County filters across declarations, housing, and PA recognize terminal County, Parish, Borough, and Census Area forms with or without parentheses (`Harris County` and `Harris (County)`). Recognized names use the stored counterpart spelling; unknown names retain exact/case fallbacks. Bare `harris` still matches Harrison; a suffixed name retains its type. IA flags combine legacy IA and IHP declarations; they do not guarantee housing records.
 
 ---
 
 ### `fema_get_disaster` <sub>tool</sub>
 
 - Requires `disaster_number` from `fema_search_disasters`.
-- Returns up to 1,000 designated-area records, FIPS codes, incident period, and program flags combined across fetched areas; a missing disaster returns `not_found`. When more rows exist, `areas_truncated`, `total_designated_area_count`, and `notice` disclose partial coverage. False flags do not exclude programs in unfetched rows; use `fema_query_dataset` for the full declaration.
+- Returns up to 1,000 designated-area records with FIPS codes and each area's `ia_declared`, `pa_declared`, and `hm_declared` flags, incident period, and program flags combined across fetched areas; a missing disaster returns `not_found`. When more rows exist, `areas_truncated`, `total_designated_area_count`, and `notice` disclose partial coverage. False flags do not exclude programs in unfetched rows; use `fema_query_dataset` for the full declaration.
 
 ---
 

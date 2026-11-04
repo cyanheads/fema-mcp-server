@@ -30,6 +30,10 @@ describe('response budget', () => {
     expect(rowsWithinBudget(4, () => 25_000)).toBe(4);
     expect(rowsWithinBudget(5, () => 25_000)).toBe(4);
   });
+  it('charges compact JSON for a fallback row, without including the result envelope (#67)', () => {
+    const row = { note: 'line1\r\nline2', nested: { value: '*raw*' } };
+    expect(rowCharge(row, 'a'.repeat(1000))).toBe(JSON.stringify(row).length + 2);
+  });
 
   it('cuts at the first row that would cross the budget, never inside a row', () => {
     const charges = [40_000, 40_000, 20_001, 1];

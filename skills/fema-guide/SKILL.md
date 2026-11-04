@@ -4,7 +4,7 @@ description: Gates, identifier sources, and OData syntax for the fema_* tools ov
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -23,7 +23,7 @@ Records for recent disasters are incomplete. In `FemaWebDisasterSummaries`, null
 | Dataset name | `fema_query_dataset` on dataset `DataSets` (fields `name`, `version`, `title`). Names are case-sensitive. |
 | Field names and types | `fema_query_dataset` on dataset `DataSetFields`, filtered by `openFemaDataSet` and `datasetVersion`. |
 
-One storm usually means several declarations: one per state, often an EM before the DR. A `HARVEY` title search returns DR-4332 (TX), DR-4345 (LA), and EM-3382 (LA), plus the unrelated FM-2697 HARVEYTOWN FIRE. `fema_search_disasters` has no title filter, so to find a storm by name, either search by state and a declaration-date window, or call `fema_query_dataset` on `DisasterDeclarationsSummaries` with `substringof('HARVEY', declarationTitle)`. Titles are stored upper-case. Incident types don't always match the storm's name: Tropical Storm Allison (DR-1379) is filed as `Coastal Storm`.
+One storm usually means several declarations: one per state, often an EM before the DR. Call `fema_search_disasters` with `title: "harvey"` for deduplicated declarations: DR-4332 (TX), DR-4345 (LA), and EM-3382 (LA), plus the unrelated FM-2697 HARVEYTOWN FIRE. The title is a case-insensitive substring, not a storm identifier; combine it with state, declaration type, or dates to narrow the match. Incident types don't always match the storm's name: Tropical Storm Allison (DR-1379) is filed as `Coastal Storm`.
 
 | Dataset | County stored as |
 |:--|:--|
@@ -34,10 +34,10 @@ One storm usually means several declarations: one per state, often an EM before 
 
 ## Gates
 
-- **Pass the bare county name** (`Harris`, `harris`) to the county filters of `fema_search_disasters`, `fema_get_public_assistance`, and `fema_get_housing_assistance`. A name carrying another dataset's suffix matches nothing: `Harris County` returns no declarations and no housing records, and `Harris (County)` returns no PA projects. Each of these comes back as a zero-match notice, never an error. The bare name also matches its substring siblings (Harrison), so check `matched_areas` or each row's county and drop those before you total anything.
+- **Recognized county suffixes work across datasets.** The county filters of `fema_search_disasters`, `fema_get_public_assistance`, and `fema_get_housing_assistance` recognize terminal County, Parish, Borough, and Census Area forms with or without parentheses: `Harris County` and `Harris (County)` identify the same name/type. Unknown names retain exact/case fallbacks. Bare `Harris` also matches Harrison; check `matched_areas` or each row's county before totaling. A suffixed name keeps its type instead of broadening to the bare substring.
 - **County PA totals leave out `Statewide` projects.** DR-4332 has 734 of them, filed under state agencies rather than a county. When you report a county figure, say it excludes them.
-- **Don't conclude "no IA" from `ia_declared`.** It reflects the Individuals and Households Program flag only, and FEMA's two flags disagree in both directions: older declarations, as late as DR-1689 (2007), can carry IA without IHP, so they show `ia_declared: false` and a program line without IA (DR-1379 reads `PA, HM`, DR-1689 reads `HM`), while some recent ones carry IHP without IA (DR-4953). The housing tools hold nothing earlier than DR-1439 (declared 2002-11-05). When the question is whether IA was declared, run `fema_query_dataset` on `DisasterDeclarationsSummaries`, select both `iaProgramDeclared` and `ihProgramDeclared`, and report what each says.
-- **No tool sums dollars.** For one disaster's totals, use `fema_query_dataset` on `FemaWebDisasterSummaries`, filtered `disasterNumber eq <n>`. It returns IHP approved (housing + other needs), PA obligated in total and for categories A–B and C–G (the total also covers other categories, so the two sub-totals sum to less), and HMGP. For a county or applicant breakdown, page the projects or housing records to the end with `next_offset` before you report a sum. Pages are bounded by characters, so a `fema_query_dataset` call that selects only the amount fields fits more rows per page than the curated tools do.
+- **IA designation does not guarantee housing records.** `ia_declared` combines legacy `iaProgramDeclared` and `ihProgramDeclared` (IHP), including older IA-only declarations. Search rollups cover the whole declaration unless `area_totals_unavailable`; detail and resource flags cover fetched rows, so a false flag with partial coverage cannot establish absence. For a county's designation, read `designated_areas` in `fema_get_disaster` or county-filtered search's `matched_areas`. Housing datasets have their own coverage and recent data can lag.
+- **Curated assistance tools return rows, not disaster totals.** For one disaster's totals, use `fema_query_dataset` on `FemaWebDisasterSummaries`, filtered `disasterNumber eq <n>`. It returns IHP approved (housing + other needs), PA obligated in total and for categories A–B and C–G (the total also covers other categories, so the two sub-totals sum to less), and HMGP. For a county or applicant breakdown, page the projects or housing records to the end with `next_offset` before you report a sum. Pages are bounded by characters, so a `fema_query_dataset` call that selects only the amount fields fits more rows per page than the curated tools do.
 - **NFIP claims carry no disaster number.** Scope them by state, county FIPS, and loss year. To tie claims to a named event, run `fema_query_dataset` on `NfipClaims` with `floodEvent eq 'Hurricane Harvey'`, keeping state and `countyCode` in the same filter. `fema_search_nfip` doesn't expose `floodEvent`.
 - **Size an NFIP query before you aggregate it.** Compare `total_count` with the canvas row cap named in `fema_search_nfip`'s description; Harris County's Harvey claims alone come to about 49,000. When a match runs past the cap, split it by year range, stage each range onto the same canvas, and combine the tables in SQL with `UNION ALL`. Only a call at offset 0 stages.
 - **Group flood zones deliberately.** `rated_flood_zone` mixes current codes (`AE`, `VE`, `X`) with legacy ones (`A01`–`A30`, `V`-numbered, `B`, `C`) and nulls. By FEMA's definitions, every A and V code is the Special Flood Hazard Area (the 100-year floodplain), `B` is moderate hazard, and `C` is minimal hazard. `X` alone doesn't tell you whether a zone is moderate or minimal.
@@ -61,7 +61,7 @@ Field names differ between datasets: `stateAbbreviation` on PA project details, 
 
 ## Workflows
 
-**Money for a disaster.** Find the disaster number. For headline figures, use `FemaWebDisasterSummaries`. For a county, filter `fema_get_public_assistance` and `fema_get_housing_assistance` with the bare county name, drop sibling counties, page to the end, and sum. Report which PA amount you summed; the tool's field descriptions define each one.
+**Money for a disaster.** Find the disaster number. For headline figures, use `FemaWebDisasterSummaries`. For a county, filter `fema_get_public_assistance` and `fema_get_housing_assistance` with its recognized name and type (such as `Harris County`), check the returned county names, page to the end, and sum. Report which PA amount you summed; the tool's field descriptions define each one.
 
 **Flood claims for an area.** Get the 5-digit FIPS from the declaration tools. Call `fema_search_nfip` with state, county, and year range at offset 0, then aggregate on the canvas. For a single named event, filter `floodEvent` through `fema_query_dataset` instead.
 

@@ -52,7 +52,7 @@ function makeDisasterRow(overrides: Record<string, unknown> = {}) {
     declarationDate: '2024-09-27T00:00:00.000Z',
     incidentBeginDate: '2024-09-26T00:00:00.000Z',
     incidentEndDate: '2024-09-28T00:00:00.000Z',
-    ihProgramDeclared: true, // IHP flag (correct); iaProgramDeclared is legacy/false for major disasters
+    ihProgramDeclared: true,
     paProgramDeclared: true,
     hmProgramDeclared: false,
     ...overrides,
@@ -60,6 +60,19 @@ function makeDisasterRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('femaDisasterResource', () => {
+  it('reports legacy-only IA in the resource summary (#57)', async () => {
+    const fetchDisasters = vi.fn().mockResolvedValue({
+      rows: [makeDisasterRow({ iaProgramDeclared: true, ihProgramDeclared: false })],
+      count: 1,
+    });
+    await setMock({ fetchDisasters });
+    const result = await femaDisasterResource.handler(
+      { disasterNumber: '1379' },
+      createMockContext({ errors: femaDisasterResource.errors }),
+    );
+    expect(result).toMatchObject({ programs_declared: ['IA', 'PA'] });
+    expect(fetchDisasters.mock.calls[0]?.[0].select).toContain('iaProgramDeclared');
+  });
   it('keeps a complete 500-row declaration without truncation metadata (#54)', async () => {
     const fetchDisasters = vi.fn().mockResolvedValue({
       rows: Array.from({ length: 500 }, () => makeDisasterRow()),
@@ -135,13 +148,13 @@ describe('femaDisasterResource', () => {
     expect(result.programs_declared).not.toContain('HM');
   });
 
-  it('programs_declared uses ihProgramDeclared (IHP flag), not iaProgramDeclared', async () => {
+  it('retains modern IHP-only IA when the legacy flag is false', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({
         rows: [
           makeDisasterRow({
             ihProgramDeclared: true,
-            iaProgramDeclared: false, // legacy flag — should NOT drive IA in programs_declared
+            iaProgramDeclared: false,
           }),
         ],
         count: 1,

@@ -10,6 +10,7 @@ import {
   renderTableHeader,
   renderTableRow,
 } from '@/mcp-server/tools/markdown-table.js';
+import { renderedText } from '../helpers/rendered-markdown.js';
 
 describe('formatTableCell', () => {
   it.each([
@@ -34,19 +35,22 @@ describe('formatTableCell', () => {
       '[{"format":"csv"},{"format":"parquet"}]',
     ],
     ['nested values', { a: [1, { b: null, c: '' }] }, '{"a":[1,{"b":null,"c":""}]}'],
-    ['a pipe', 'a|b', 'a\\|b'],
-    ['a pipe inside nested JSON', { note: 'a|b' }, '{"note":"a\\|b"}'],
-    ['a backslash before a pipe', 'a\\|b', 'a\\\\\\|b'],
-    ['two backslashes before a pipe', 'a\\\\|b', 'a\\\\\\\\\\|b'],
+    ['a pipe', 'a|b', 'a|b'],
+    ['a pipe inside nested JSON', { note: 'a|b' }, '{"note":"a|b"}'],
+    ['a backslash before a pipe', 'a\\|b', 'a\\|b'],
+    ['two backslashes before a pipe', 'a\\\\|b', 'a\\\\|b'],
     ['a backslash not before a pipe', 'C:\\temp\\', 'C:\\temp\\'],
-    ['a LF', 'line1\nline2', 'line1 line2'],
-    ['a CR', 'line1\rline2', 'line1 line2'],
-    ['a CRLF', 'line1\r\nline2', 'line1 line2'],
-    ['CR, CRLF, and LF in a row', 'a\r\r\n\nb', 'a   b'],
+    ['a LF', 'line1\nline2', '"line1\\nline2"'],
+    ['a CR', 'line1\rline2', '"line1\\rline2"'],
+    ['a CRLF', 'line1\r\nline2', '"line1\\r\\nline2"'],
+    ['CR, CRLF, and LF in a row', 'a\r\r\n\nb', '"a\\r\\r\\n\\nb"'],
     ['a line break inside nested JSON', { nl: 'x\ny' }, '{"nl":"x\\ny"}'],
     ['the string "null"', 'null', 'null'],
   ])('renders %s', (_name, value, expected) => {
-    expect(formatTableCell(value)).toBe(expected);
+    expect(renderedText(`${renderTableHeader(['value'])}\n| ${formatTableCell(value)} |`)).toEqual([
+      'value',
+      expected,
+    ]);
   });
 
   /**
@@ -99,9 +103,9 @@ describe('renderTableHeader', () => {
     );
   });
 
-  it('escapes a pipe and flattens a line break in a column name', () => {
+  it('escapes pipes and preserves a line break as JSON notation in a column name', () => {
     expect(renderTableHeader(['a|b', 'c\r\nd', ''])).toBe(
-      '| a\\|b | c d | "" |\n| --- | --- | --- |',
+      '| a\\|b | "c\\r\\nd" | "" |\n| --- | --- | --- |',
     );
   });
 });
@@ -120,7 +124,13 @@ describe('renderTableRow', () => {
       },
       columns,
     );
-    expect(line).toBe('| NfipClaims | [{"format":"csv"}] | null | "" | One.  Two \\| three. |');
+    expect(renderedText(`${renderTableHeader(columns)}\n${line}`).slice(columns.length)).toEqual([
+      'NfipClaims',
+      '[{"format":"csv"}]',
+      'null',
+      '""',
+      '"One.\\n\\nTwo | three."',
+    ]);
   });
 
   it('renders a column the record lacks as an empty cell, and ignores keys outside the column list', () => {

@@ -25,6 +25,7 @@ import {
   jsonResponse,
   routeFetch,
 } from '../helpers/openfema-fixtures.js';
+import { jsonFallback, renderedText } from '../helpers/rendered-markdown.js';
 
 const DDS = 'DisasterDeclarationsSummaries';
 const DDS_ROW = {
@@ -509,7 +510,7 @@ describe('fema_query_dataset — format', () => {
     ]);
   });
 
-  it('renders nested values as compact JSON, null and "" as distinct cells, and keeps one line per record (#43)', async () => {
+  it('preserves complete nested values and multiline text with JSON fallback (#43, #67)', async () => {
     const row = {
       name: 'NfipClaims',
       distribution: [
@@ -542,12 +543,12 @@ describe('fema_query_dataset — format', () => {
     expect(JSON.stringify((result.structuredContent as { rows: unknown[] }).rows)).toBe(
       JSON.stringify([row]),
     );
-    const lines = tableLines(contentText(result));
-    expect(lines).toEqual([
-      '| name | distribution | keyword | license | title | description | version | api |',
-      '| --- | --- | --- | --- | --- | --- | --- | --- |',
-      '| NfipClaims | [{"format":"csv","accessURL":"https://example.test/claims.csv"},{"format":"parquet","accessURL":"https://example.test/claims.parquet"}] | ["NFIP","claims","flood insurance"] | null | "" | Paragraph one.  Para \\| two. Three. Four | 3 | true |',
-    ]);
+    expect(jsonFallback((result.content![0] as { text: string }).text)).toEqual({
+      dataset: 'OpenFemaDataSets',
+      rows: [row],
+      total_count: 1,
+      returned_count: 1,
+    });
     expect(contentText(result)).not.toContain('[object Object]');
   });
 
@@ -573,27 +574,33 @@ describe('fema_query_dataset — format', () => {
     const lines = tableLines(text);
     expect(lines).toHaveLength(53);
     expect(lines[0]).toBe('| identifier | code | note | info | paProgramDeclared |');
-    expect(lines.slice(2)).toEqual(
-      rows.map(
-        (r) =>
-          `| ${r.identifier} | ["IPAWSv1.0"] | null | [{"category":["Met"],"event":"Flood Warning","ihProgramDeclared":false}] | true |`,
-      ),
+    expect(renderedText((result.content![0] as { text: string }).text).slice(6)).toEqual(
+      rows.flatMap((r) => [
+        r.identifier,
+        '["IPAWSv1.0"]',
+        'null',
+        '[{"category":["Met"],"event":"Flood Warning","ihProgramDeclared":false}]',
+        'true',
+      ]),
     );
     for (const line of lines) expect(cellsOf(line)).toHaveLength(5);
     expect(text).not.toContain('[object Object]');
     expect(text).not.toContain('note: null');
   });
 
-  it('escapes a pipe or line break in a field name so the header keeps one cell per field (#43)', () => {
+  it('preserves multiline field names through complete JSON fallback (#43, #67)', () => {
     const blocks = femaQueryDataset.format!({
       dataset: DDS,
       rows: [{ 'a|b': 1, 'c\nd': 2 }],
       total_count: 1,
       returned_count: 1,
     });
-    const lines = tableLines((blocks[0] as { text: string }).text);
-    expect(lines).toEqual(['| a\\|b | c d |', '| --- | --- |', '| 1 | 2 |']);
-    for (const line of lines) expect(cellsOf(line)).toHaveLength(2);
+    expect(jsonFallback((blocks[0] as { text: string }).text)).toEqual({
+      dataset: DDS,
+      rows: [{ 'a|b': 1, 'c\nd': 2 }],
+      total_count: 1,
+      returned_count: 1,
+    });
   });
 });
 
@@ -980,6 +987,22 @@ describe('fema_query_dataset — retired and deprecated dataset versions (#51)',
       `Returned 1 of the 51943 matching records from offset 0, as many as limit allows; continue with offset 1. OpenFEMA has deprecated this version of "${COMMUNITY}", to be retired on 2099-11-09. OpenFEMA's notice: ${DEPRECATED.depApiMessage}`,
     );
     expect(contentText(result)).toContain(o.notice);
+  });
+  it('preserves Markdown-active upstream deprecation text in raw and rendered notices (#67)', async () => {
+    const message = '*literal* <b>retired</b> &amp; [notice]';
+    fetchMock.mockImplementation(
+      routeFetch([
+        [CATALOG_URL, () => catalog()],
+        [
+          endpoint(COMMUNITY, 1),
+          () => envelope(COMMUNITY, [{ id: 1 }], 1, { ...DEPRECATED, depApiMessage: message }),
+        ],
+      ]),
+    );
+    const result = await runToolContract(femaQueryDataset, { dataset: COMMUNITY, limit: 1 });
+    expect(result.isError).not.toBe(true);
+    expect(page(result).notice).toContain(message);
+    expect(renderedText(contentText(result)).join('\n')).toContain(message);
   });
 
   it('a retired version paged past its count keeps the past-the-end notice and adds its message', async () => {

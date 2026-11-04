@@ -26,7 +26,7 @@ vi.mock('@/services/openfema/openfema-service.js', async (importOriginal) => {
   };
 });
 
-/** Minimal disaster row fixture. Uses ihProgramDeclared (IHP flag), not iaProgramDeclared. */
+/** Minimal modern declaration row; legacy IA is supplied by regression fixtures. */
 function makeDisasterRow(overrides: Record<string, unknown> = {}) {
   return {
     disasterNumber: 4781,
@@ -73,6 +73,95 @@ function threeDeclarationRows() {
 }
 
 describe('femaSearchDisasters', () => {
+  it.each(['harvey', ' HARVEY ', 'HaRvEy'])(
+    'filters normalized title before deduplication: %s (#64)',
+    async (title) => {
+      const fetchDisasters = vi
+        .fn()
+        .mockResolvedValue({ rows: [makeDisasterRow(), makeDisasterRow()], count: 2 });
+      await setMock({ fetchDisasters });
+      const result = await runToolContract(femaSearchDisasters, {
+        title,
+        state: 'TX',
+        declaration_type: 'DR',
+        date_from: '2017-08-01',
+        date_to: '2017-10-31',
+        incident_type: 'Hurricane',
+        county: 'Harris',
+      });
+      expect(result.structuredContent).toMatchObject({ returned_count: 1, total_declarations: 1 });
+      expect(contentText(result)).toContain('DR-4781');
+      const filter = fetchDisasters.mock.calls[0]?.[0].filter;
+      expect(filter).toContain("substringof('HARVEY', declarationTitle)");
+      for (const fragment of [
+        "state eq 'TX'",
+        "declarationType eq 'DR'",
+        'declarationDate ge',
+        'declarationDate le',
+        'incidentType',
+        'designatedArea',
+      ])
+        expect(filter).toContain(fragment);
+    },
+  );
+
+  it('escapes title apostrophes and omits blank titles (#64)', async () => {
+    const fetchDisasters = vi.fn().mockResolvedValue({ rows: [], count: 0 });
+    await setMock({ fetchDisasters });
+    const quoted = await runToolContract(femaSearchDisasters, { title: "o'brien" });
+    expect(fetchDisasters.mock.calls[0]?.[0].filter).toBe(
+      "substringof('O''BRIEN', declarationTitle)",
+    );
+    expect(contentText(quoted)).toContain('widening title');
+    expect(quoted.structuredContent).toMatchObject({
+      declarations: [],
+      notice: expect.stringContaining('title'),
+    });
+    for (const title of ['', ' \n ']) {
+      const blank = await runToolContract(femaSearchDisasters, { title });
+      expect(fetchDisasters.mock.lastCall?.[0]).not.toHaveProperty('filter');
+      expect(contentText(blank)).not.toContain('widening title');
+    }
+    const invalidTitle: Record<string, unknown> = { title: { name: 'Harvey' } };
+    const invalid = await runToolContract(femaSearchDisasters, invalidTitle);
+    expect(invalid.isError).toBe(true);
+  });
+  it('rolls legacy IA into declarations and county matches (#57)', async () => {
+    const rows = [
+      makeDisasterRow({
+        ihProgramDeclared: false,
+        iaProgramDeclared: false,
+        designatedArea: 'Harris (County)',
+      }),
+      makeDisasterRow({
+        ihProgramDeclared: false,
+        iaProgramDeclared: true,
+        designatedArea: 'Harris (County)',
+      }),
+    ];
+    const fetchDisasters = vi.fn().mockResolvedValue({ rows, count: 2 });
+    await setMock({ fetchDisasters });
+    for (const input of [{}, { county: 'Harris' }]) {
+      const result = await runToolContract(femaSearchDisasters, input);
+      expect(result.structuredContent).toMatchObject({
+        declarations: [expect.objectContaining({ ia_declared: true })],
+      });
+      expect(contentText(result)).toContain('IA');
+      if ('county' in input)
+        expect(result.structuredContent).toMatchObject({
+          declarations: [
+            expect.objectContaining({
+              matched_areas: [
+                expect.objectContaining({ ia_declared: false }),
+                expect.objectContaining({ ia_declared: true }),
+              ],
+            }),
+          ],
+        });
+    }
+    for (const [opts] of fetchDisasters.mock.calls)
+      expect(opts.select).toContain('iaProgramDeclared');
+  });
   beforeEach(async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({
@@ -97,15 +186,13 @@ describe('femaSearchDisasters', () => {
     expect(result.returned_count).toBe(1);
   });
 
-  it('ia_declared reflects ihProgramDeclared (IHP flag), not iaProgramDeclared', async () => {
-    // iaProgramDeclared is the legacy general-IA flag (false for major disasters since ~2012).
-    // ihProgramDeclared (Individuals & Households Program) is the correct field.
+  it('retains modern IHP-only IA when the legacy flag is false', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({
         rows: [
           makeDisasterRow({
             ihProgramDeclared: true,
-            iaProgramDeclared: false, // legacy flag — should NOT be used
+            iaProgramDeclared: false,
           }),
         ],
         count: 1,
@@ -652,6 +739,11 @@ describe('femaSearchDisasters — case-insensitive name filters (#41)', () => {
     const filter = await filterSent({ incident_type: 'Hurricane', county: "O'Brien" });
     expect(filter).toContain("substringof('Hurricane', incidentType)");
     expect(filter).toContain("substringof('O''Brien', designatedArea)");
+  });
+  it('wires the shared typed county counterpart into designatedArea filtering (#58)', async () => {
+    expect(await filterSent({ county: 'harris county' })).toContain(
+      "substringof('Harris (County)', designatedArea)",
+    );
   });
 
   it('or-joins the spellings in parentheses so each filter composes with the others', async () => {

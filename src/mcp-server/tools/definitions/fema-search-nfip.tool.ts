@@ -12,6 +12,13 @@ import {
   spillover,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { internalError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
+import {
+  renderJson,
+  renderLiteral,
+  renderNotice,
+  requiresJson,
+} from '@/mcp-server/tools/literal-markdown.js';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 import { escapeODataString, getOpenFemaService } from '@/services/openfema/openfema-service.js';
 import type { RawNfipClaim } from '@/services/openfema/types.js';
@@ -161,6 +168,43 @@ type CanvasRow = {
   occupancy_type: number | null;
 };
 
+/** One claim's actual escaped inline representation, shared by formatting and budget accounting. */
+function renderClaim(c: { [K in keyof CanvasRow]?: CanvasRow[K] | undefined }): string {
+  const parts: string[] = [];
+  if (c.state) parts.push(`State: ${literal(c.state)}`);
+  if (c.county_code) parts.push(`County: ${literal(c.county_code)}`);
+  if (c.zip_code) parts.push(`ZIP: ${literal(c.zip_code)}`);
+  if (c.date_of_loss) parts.push(`Loss: ${literal(c.date_of_loss)}`);
+  if (c.year_of_loss != null) parts.push(`Year: ${c.year_of_loss}`);
+  if (c.rated_flood_zone) parts.push(`Zone: ${literal(c.rated_flood_zone)}`);
+  if (c.cause_of_damage) parts.push(`Cause: ${literal(c.cause_of_damage)}`);
+  if (c.occupancy_type) parts.push(`Occupancy: ${c.occupancy_type}`);
+  if (c.amount_paid_building != null)
+    parts.push(`Bldg Paid: $${c.amount_paid_building.toLocaleString()}`);
+  if (c.amount_paid_contents != null)
+    parts.push(`Contents Paid: $${c.amount_paid_contents.toLocaleString()}`);
+  if (c.building_damage_amount != null)
+    parts.push(`Bldg Damage: $${c.building_damage_amount.toLocaleString()}`);
+  if (c.contents_damage_amount != null)
+    parts.push(`Contents Damage: $${c.contents_damage_amount.toLocaleString()}`);
+  return parts.join(' | ');
+}
+
+/** Keep the canvas JSON budget and also charge any larger escaped output representation. */
+function withinRenderedBudget(rows: CanvasRow[]): CanvasRow[] {
+  let chars = 0;
+  let fit = 0;
+  for (const row of rows) {
+    const claim = toOutputRow(row);
+    const rendered = requiresJson(row) ? JSON.stringify(claim).length : renderClaim(claim).length;
+    chars += Math.max(JSON.stringify(row).length, rendered);
+    if (chars > PREVIEW_CHARS) break;
+    fit++;
+  }
+  // A single oversized row stays whole so continuation always advances.
+  return rows.slice(0, Math.max(fit, 1));
+}
+
 /** Map a raw API row to a canvas row (all fields explicitly null when absent). */
 function toCanvasRow(r: RawNfipClaim): CanvasRow {
   return {
@@ -180,8 +224,8 @@ function toCanvasRow(r: RawNfipClaim): CanvasRow {
 }
 
 /** Convert canvas rows (null fields) to the output schema shape (absent fields). */
-function toOutputRows(canvasRows: CanvasRow[]) {
-  return canvasRows.map((r) => ({
+function toOutputRow(r: CanvasRow) {
+  return {
     ...(r.state != null ? { state: r.state } : {}),
     ...(r.county_code != null ? { county_code: r.county_code } : {}),
     ...(r.zip_code != null ? { zip_code: r.zip_code } : {}),
@@ -198,7 +242,7 @@ function toOutputRows(canvasRows: CanvasRow[]) {
     ...(r.rated_flood_zone != null ? { rated_flood_zone: r.rated_flood_zone } : {}),
     ...(r.cause_of_damage != null ? { cause_of_damage: r.cause_of_damage } : {}),
     ...(r.occupancy_type != null ? { occupancy_type: r.occupancy_type } : {}),
-  }));
+  };
 }
 
 /**
@@ -420,6 +464,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       ),
   },
   enrichmentTrailer: {
+    notice: { render: renderNotice },
     next_offset: { label: 'Next offset' },
   },
   errors: [
@@ -589,7 +634,8 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     const firstRows = first.rows.map(toCanvasRow);
 
     /** An unstaged page starting at `offset`; the notice names where to continue when claims were left out. */
-    const inline = (rows: CanvasRow[]) => {
+    const inline = (candidateRows: CanvasRow[]) => {
+      const rows = withinRenderedBudget(candidateRows);
       const next = offset + rows.length;
       if (next < total) {
         ctx.enrich({ next_offset: next });
@@ -601,7 +647,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       } else if (coverage) notice('');
       ctx.log.info('NFIP claims returned inline', { total, offset, returned: rows.length });
       return {
-        claims: toOutputRows(rows),
+        claims: rows.map(toOutputRow),
         total_count: total,
         returned_count: rows.length,
         spilled: false,
@@ -669,7 +715,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     const staged = handle.rowCount;
     // Tied to the cap, not to staged < total: a match OpenFEMA updates mid-drain can also differ.
     const truncated = staged === MAX_CANVAS_ROWS && total > staged;
-    const claims = previewRows.slice(0, limit);
+    const claims = withinRenderedBudget(previewRows).slice(0, limit);
     // A spill happens at offset 0 only, and only for a match larger than its preview.
     if (claims.length < total) ctx.enrich({ next_offset: claims.length });
     const where = `table "${handle.tableName}" (canvas_id "${instance.canvasId}")`;
@@ -688,7 +734,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       truncated,
     });
     return {
-      claims: toOutputRows(claims),
+      claims: claims.map(toOutputRow),
       total_count: total,
       returned_count: claims.length,
       staged_count: staged,
@@ -700,13 +746,14 @@ export const femaSearchNfip = tool('fema_search_nfip', {
   },
 
   format: (result) => {
+    if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
     lines.push(
       `**${result.returned_count} of ${result.total_count} NFIP claims** | Spilled: ${result.spilled}`,
     );
     if (result.spilled) {
       lines.push(
-        `**Canvas ID:** ${result.canvas_id} | **Table:** ${result.canvas_table} | **Staged rows:** ${result.staged_count}`,
+        `**Canvas ID:** ${renderLiteral(result.canvas_id)} | **Table:** ${renderLiteral(result.canvas_table)} | **Staged rows:** ${result.staged_count}`,
       );
       lines.push(
         "List the table's columns with fema_dataframe_describe, then run SQL with fema_dataframe_query using this canvas_id.\n",
@@ -724,26 +771,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
           : '_This page is empty: the offset is past the end of the matching claims._',
       );
     }
-    for (const c of result.claims) {
-      const parts: string[] = [];
-      if (c.state) parts.push(`State: ${c.state}`);
-      if (c.county_code) parts.push(`County: ${c.county_code}`);
-      if (c.zip_code) parts.push(`ZIP: ${c.zip_code}`);
-      if (c.date_of_loss) parts.push(`Loss: ${c.date_of_loss}`);
-      if (c.year_of_loss != null) parts.push(`Year: ${c.year_of_loss}`);
-      if (c.rated_flood_zone) parts.push(`Zone: ${c.rated_flood_zone}`);
-      if (c.cause_of_damage) parts.push(`Cause: ${c.cause_of_damage}`);
-      if (c.occupancy_type) parts.push(`Occupancy: ${c.occupancy_type}`);
-      if (c.amount_paid_building != null)
-        parts.push(`Bldg Paid: $${c.amount_paid_building.toLocaleString()}`);
-      if (c.amount_paid_contents != null)
-        parts.push(`Contents Paid: $${c.amount_paid_contents.toLocaleString()}`);
-      if (c.building_damage_amount != null)
-        parts.push(`Bldg Damage: $${c.building_damage_amount.toLocaleString()}`);
-      if (c.contents_damage_amount != null)
-        parts.push(`Contents Damage: $${c.contents_damage_amount.toLocaleString()}`);
-      lines.push(parts.join(' | '));
-    }
+    for (const c of result.claims) lines.push(renderClaim(c));
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

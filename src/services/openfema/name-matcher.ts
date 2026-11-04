@@ -51,33 +51,66 @@ function titleCase(lower: string): string {
     .replace(/(?<=\s)(?:Of|The|And)(?=\s|$)/g, (word) => word.toLowerCase());
 }
 
-/**
- * The exact-case substrings to send for `input`: every distinct spelling of it found in
- * `vocabulary`, then the input as given, lowercase, UPPERCASE, and Title Case. A blank
- * input yields none.
- */
-function spellingsIn(input: string, vocabulary: IndexedVocabulary): string[] {
-  const trimmed = input.trim();
-  if (!trimmed) return [];
-  const lower = trimmed.toLowerCase();
+/** Stored spellings only, for a nonblank trimmed input; synthetic aliases need no fallback. */
+function storedSpellingsIn(input: string, vocabulary: IndexedVocabulary): string[] {
+  const lower = input.toLowerCase();
   const found = new Set<string>();
   for (const [value, lowered] of vocabulary) {
     for (let at = lowered.indexOf(lower); at !== -1; at = lowered.indexOf(lower, at + 1)) {
       found.add(value.slice(at, at + lower.length));
     }
   }
+  return [...found].sort();
+}
+
+/** Stored spellings followed by fixed case fallbacks, retaining names added after the snapshot. */
+function spellingsIn(input: string, vocabulary: IndexedVocabulary): string[] {
+  const trimmed = input.trim();
+  if (!trimmed) return [];
+  const lower = trimmed.toLowerCase();
   return [
-    ...new Set([...[...found].sort(), trimmed, lower, trimmed.toUpperCase(), titleCase(lower)]),
+    ...new Set([
+      ...storedSpellingsIn(trimmed, vocabulary),
+      trimmed,
+      lower,
+      trimmed.toUpperCase(),
+      titleCase(lower),
+    ]),
   ];
 }
 
 /**
  * Exact-case spellings of a county or other designated-area name, resolved against the
  * declaration `designatedArea` values, their `<name> <type>` forms, and PA `county` values.
+ * Recognized terminal area types accept either parentheses form, without broadening to a
+ * bare name. Unknown counterparts add no synthetic aliases, preserving existing fallbacks
+ * and avoiding URL growth for long names that cannot occur in the snapshot.
  * Exact PA spellings are included even where declaration names differ beyond casing.
  */
 export function countySpellings(input: string): string[] {
-  return spellingsIn(input, AREA_VOCABULARY);
+  const trimmed = input.trim();
+  if (!trimmed) return [];
+  const original = spellingsIn(trimmed, AREA_VOCABULARY);
+  const lower = trimmed.toLowerCase();
+  for (const type of ['county', 'parish', 'borough', 'census area']) {
+    const parenthesized = ` (${type})`;
+    const plain = ` ${type}`;
+    if (lower.endsWith(parenthesized) && trimmed.length > parenthesized.length) {
+      const name = trimmed.slice(0, -parenthesized.length);
+      const storedType = trimmed.slice(-parenthesized.length + 2, -1);
+      return [
+        ...new Set([...original, ...storedSpellingsIn(`${name} ${storedType}`, AREA_VOCABULARY)]),
+      ];
+    }
+    if (lower.endsWith(plain) && trimmed.length > plain.length) {
+      const name = trimmed.slice(0, -plain.length);
+      const storedType = trimmed.slice(-type.length);
+      return [
+        ...new Set([...original, ...storedSpellingsIn(`${name} (${storedType})`, AREA_VOCABULARY)]),
+      ];
+    }
+  }
+  return original;
 }
 
 /** Exact-case spellings of an incident type fragment, resolved against OpenFEMA's incident types. */

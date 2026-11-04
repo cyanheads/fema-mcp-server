@@ -7,6 +7,7 @@ import { disabledTool, tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
+import { renderJson, renderLiteral, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 
 const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
@@ -91,9 +92,11 @@ const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
   format: (result) => [
     {
       type: 'text',
-      text: result.dropped
-        ? `Dropped \`${result.table_name}\` from canvas \`${result.canvas_id}\`.`
-        : `No table or view named \`${result.table_name}\` exists on canvas \`${result.canvas_id}\`.`,
+      text: requiresJson(result)
+        ? renderJson(result)
+        : result.dropped
+          ? `Dropped ${renderLiteral(result.table_name)} from canvas ${renderLiteral(result.canvas_id)}.`
+          : `No table or view named ${renderLiteral(result.table_name)} exists on canvas ${renderLiteral(result.canvas_id)}.`,
     },
   ],
 });
