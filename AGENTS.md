@@ -13,6 +13,7 @@
 
 ## Core Rules
 
+- **DuckDB dependency hold:** Keep `@duckdb/node-api` at `^1.5.6-r.2` until [mcp-ts-core#800](https://github.com/cyanheads/mcp-ts-core/issues/800) is resolved. Framework 0.13.18 excludes `PRAGMA_SHOW` from its SQL plan allowlist, so DuckDB 2 rejects `SHOW <table>` on canvas tables.
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
