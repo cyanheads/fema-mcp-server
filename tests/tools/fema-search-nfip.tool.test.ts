@@ -664,14 +664,20 @@ describe('fema_search_nfip — county_code forms and the year range (#45)', () =
 });
 
 describe('fema_search_nfip — canvas disabled', () => {
-  it.each([
-    { enabled: false, total: 2, spilled: false },
-    { enabled: true, total: 1, spilled: false },
-    { enabled: true, total: 2, spilled: true },
-  ])(
-    'returns an oversized escaped first row whole (canvas=$enabled, total=$total)',
-    async ({ enabled, total, spilled }) => {
-      const zone = '*'.repeat(60_000);
+  it.each(
+    [
+      // Over the budget only once each `*` is escaped.
+      { size: 'escaped text', zone: '*'.repeat(60_000) },
+      // Over the budget as canvas-row JSON too, which spillover() keeps out of its preview.
+      { size: 'JSON', zone: 'x'.repeat(120_000) },
+    ].flatMap((row) => [
+      { ...row, enabled: false, total: 2, spilled: false },
+      { ...row, enabled: true, total: 1, spilled: false },
+      { ...row, enabled: true, total: 2, spilled: true },
+    ]),
+  )(
+    'returns a first row over the budget in $size whole (canvas=$enabled, total=$total)',
+    async ({ zone, enabled, total, spilled }) => {
       if (enabled) useCanvas();
       fetchMock.mockImplementation(
         nfipMatch(total, { row: (i) => ({ ...claim(i), ratedFloodZone: zone }) }),

@@ -247,7 +247,8 @@ function toOutputRow(r: CanvasRow) {
 
 /**
  * The leading rows whose canvas-row JSON fits the inline budget — the same per-row
- * `JSON.stringify` measure and cut-off `spillover()` applies to its preview.
+ * `JSON.stringify` measure and cut-off `spillover()` applies to its preview — or the first
+ * row alone when it is over the budget, so a page always advances.
  */
 function withinBudget(rows: CanvasRow[]): CanvasRow[] {
   let chars = 0;
@@ -257,7 +258,7 @@ function withinBudget(rows: CanvasRow[]): CanvasRow[] {
     if (chars > PREVIEW_CHARS) break;
     fit++;
   }
-  return rows.slice(0, fit);
+  return rows.slice(0, Math.max(fit, 1));
 }
 
 /**
@@ -711,11 +712,15 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       throw error;
     }
 
-    const { handle, previewRows } = spill;
+    const { handle } = spill;
     const staged = handle.rowCount;
     // Tied to the cap, not to staged < total: a match OpenFEMA updates mid-drain can also differ.
     const truncated = staged === MAX_CANVAS_ROWS && total > staged;
-    const claims = withinRenderedBudget(previewRows).slice(0, limit);
+    /**
+     * The preview is a prefix of the first page, but spillover() leaves a first row over the
+     * budget out of it; budgeting the first page keeps that row whole, so next_offset advances.
+     */
+    const claims = withinRenderedBudget(firstRows).slice(0, limit);
     // A spill happens at offset 0 only, and only for a match larger than its preview.
     if (claims.length < total) ctx.enrich({ next_offset: claims.length });
     const where = `table "${handle.tableName}" (canvas_id "${instance.canvasId}")`;
