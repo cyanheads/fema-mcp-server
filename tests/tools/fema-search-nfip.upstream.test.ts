@@ -21,6 +21,7 @@ import {
   envelopeResponse,
   routeFetch,
 } from '../helpers/openfema-fixtures.js';
+import { renderedText } from '../helpers/rendered-markdown.js';
 
 /** A v3 claim row: the fields the tool reads plus live-API noise, with v3's explicit nulls. */
 function v3Claim(i: number) {
@@ -191,7 +192,10 @@ describe('fema_search_nfip — NfipClaims v3, DuckDB canvas', () => {
         returned_count: 5,
       });
       expect(out.claims).toHaveLength(5);
-      const text = (result.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n');
+      // Parsed, since a generated canvas ID can hold an underscore the Markdown escapes.
+      const text = renderedText(
+        (result.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n'),
+      ).join('\n');
       expect(text).toContain(out.canvas_id);
       expect(text).toContain(out.canvas_table);
 
