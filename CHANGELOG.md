@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-11-03
+
+Search declarations by title, inspect each area's program flags, resolve county type spellings across datasets, include legacy IA designations, and preserve literal upstream text in rendered results.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-29
 
 DataCanvas is on by default, the fema-guide skill is published as an MCP resource, server instructions say how NFIP claims are scoped, and the framework moves to mcp-ts-core 0.13.18: escaped error text and code-span trailer values in content[], startup errors that name the bad variable.
