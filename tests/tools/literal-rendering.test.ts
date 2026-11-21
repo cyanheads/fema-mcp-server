@@ -75,6 +75,7 @@ describe('literal result rendering (#67)', () => {
       renters: [],
       owners_count: 1,
       renters_count: 0,
+      spilled: false,
     });
     expect(inlineText(formatText(femaGetHousingAssistance.format!(housing))).join('\n')).toContain(
       '*county*, <city>, [zip]',
@@ -135,6 +136,7 @@ describe('literal result rendering (#67)', () => {
       projects: [{ disaster_number: 4399, application_title: 'Road repair' }],
       returned_count: 1,
       total_count: 1,
+      spilled: false,
     };
     expect(inlineText(formatText(femaGetPublicAssistance.format!(result)))).toContain(
       'Road repair',
@@ -151,6 +153,7 @@ describe('literal result rendering (#67)', () => {
       projects: [{ disaster_number: 4399, application_title: title }],
       returned_count: 1,
       total_count: 1,
+      spilled: false,
     };
     expect(inlineText(formatText(femaGetPublicAssistance.format!(result)))).toContain(title);
   });

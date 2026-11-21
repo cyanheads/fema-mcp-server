@@ -3,7 +3,7 @@
  * @module tests/tools/fema-get-disaster.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
@@ -14,7 +14,7 @@ vi.mock('@/services/openfema/openfema-service.js', () => {
     getOpenFemaService: () => _mockSvc,
     initOpenFemaService: () => {},
     __setMock: (svc: Record<string, unknown>) => {
-      _mockSvc = svc;
+      _mockSvc = { fetchDisasterFunding: vi.fn().mockResolvedValue({}), ...svc };
     },
   };
 });
@@ -46,6 +46,97 @@ function makeAreaRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('femaGetDisaster', () => {
+  it('returns exact amounts, zero, and null funding on both surfaces', async () => {
+    await setMock({
+      fetchDisasters: vi
+        .fn()
+        .mockResolvedValue({ rows: [makeAreaRow({ disasterNumber: 4332 })], count: 1 }),
+      fetchDisasterFunding: vi.fn().mockResolvedValue({
+        totalNumberIaApproved: 373085,
+        totalAmountIhpApproved: 1656932722.84,
+        totalAmountHaApproved: 1243287192.54,
+        totalAmountOnaApproved: 413645530.3,
+        totalObligatedAmountPa: 2998518794.48,
+        totalObligatedAmountCatAb: 1293208363.94,
+        totalObligatedAmountCatC2g: 1442148828.27,
+        totalObligatedAmountHmgp: 0,
+        iaLoadDate: '2026-11-21T00:00:00.000Z',
+        paLoadDate: null,
+      }),
+    });
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4332 });
+    expect(result.structuredContent).toMatchObject({
+      funding: {
+        ia_approved_registrations: 373085,
+        ihp_approved: 1656932722.84,
+        ha_approved: 1243287192.54,
+        ona_approved: 413645530.3,
+        pa_obligated: 2998518794.48,
+        pa_obligated_cat_ab: 1293208363.94,
+        pa_obligated_cat_c_g: 1442148828.27,
+        hmgp_obligated: 0,
+        ia_load_date: '2026-11-21T00:00:00.000Z',
+        pa_load_date: null,
+      },
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('1656932722.84');
+    expect(text).toContain('HMGP obligated (USD):** 0');
+    expect(text).toContain('PA data load date:** null');
+  });
+
+  it('keeps an actual all-null funding summary row', async () => {
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4781 });
+    const output = femaGetDisaster.output.parse(result.structuredContent);
+    expect(Object.values(output.funding ?? {})).toEqual(Array(10).fill(null));
+    expect(JSON.stringify(result.content)).toContain('IHP approved (USD):** null');
+  });
+
+  it.each([
+    ['has no disaster funding summary row', vi.fn().mockResolvedValue(undefined)],
+    [
+      'disaster funding summary could not be read',
+      vi.fn().mockRejectedValue(serviceUnavailable('Unavailable')),
+    ],
+  ])('combines "%s" with the partial areas notice', async (notice, fetchDisasterFunding) => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: [makeAreaRow()], count: 2 }),
+      fetchDisasterFunding,
+    });
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4781 });
+    expect(result.structuredContent).not.toHaveProperty('funding');
+    expect(result.structuredContent).toMatchObject({
+      notice: expect.stringMatching(new RegExp(`Returned 1 of 2 designated-area rows.*${notice}`)),
+    });
+    expect(JSON.stringify(result.content)).toContain(notice);
+  });
+
+  it.each([
+    new TypeError('Unexpected service bug'),
+    new McpError(JsonRpcErrorCode.RequestCancelled, 'Cancelled'),
+  ])('propagates a funding %s when the declaration exists', async (error) => {
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: [makeAreaRow()], count: 1 }),
+      fetchDisasterFunding: vi.fn().mockRejectedValue(error),
+    });
+    await expect(
+      femaGetDisaster.handler(
+        { disaster_number: 4781 },
+        createMockContext({ errors: femaGetDisaster.errors }),
+      ),
+    ).rejects.toBe(error);
+  });
+
+  it('aborts the concurrent funding read when the declaration does not exist', async () => {
+    const fetchDisasterFunding = vi.fn().mockRejectedValue(new TypeError('Unexpected service bug'));
+    await setMock({
+      fetchDisasters: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+      fetchDisasterFunding,
+    });
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 9999 });
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'not_found' } } });
+    expect(fetchDisasterFunding.mock.calls[0]?.[2].aborted).toBe(true);
+  });
   it('renders each area designation, including legacy IA and no programs (#60)', async () => {
     await setMock({
       fetchDisasters: vi.fn().mockResolvedValue({

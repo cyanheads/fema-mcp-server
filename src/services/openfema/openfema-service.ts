@@ -16,20 +16,25 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import type {
-  DatasetDeprecation,
-  DatasetPage,
-  OpenFemaCatalogRow,
-  OpenFemaDeprecationInformation,
-  OpenFemaEnvelope,
-  OpenFemaErrorDetail,
-  OpenFemaErrorResponse,
-  OpenFemaQueryOptions,
-  RawDisasterDeclaration,
-  RawHousingAssistance,
-  RawNfipClaim,
-  RawPaProject,
+import {
+  type DatasetDeprecation,
+  type DatasetPage,
+  type OpenFemaCatalogRow,
+  type OpenFemaDeprecationInformation,
+  type OpenFemaEnvelope,
+  type OpenFemaErrorDetail,
+  type OpenFemaErrorResponse,
+  type OpenFemaQueryOptions,
+  type RawDisasterDeclaration,
+  type RawDisasterFunding,
+  type RawHousingAssistance,
+  type RawNfipClaim,
+  type RawPaApplicant,
+  type RawPaProject,
+  rawDisasterFundingSchema,
 } from './types.js';
+
+const DISASTER_FUNDING_SELECT = Object.keys(rawDisasterFundingSchema.shape).join(',');
 
 /** How long a fetched dataset catalog is trusted before the next refresh. */
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
@@ -78,11 +83,12 @@ const LONG_URL = 8_000;
 const CDN_URL_LIMIT = 8_900;
 
 /** A refused URL between LONG_URL and the cutoff is named close to the limit, never past it. */
-function requestTooLong(urlLength: number, ctx: Context): McpError {
+function requestTooLong(urlLength: number, ctx: Context, cause: McpError): McpError {
   const relation = urlLength > CDN_URL_LIMIT ? 'past' : 'close to';
   return validationError(
     `OpenFEMA refused the request: its URL is ${urlLength.toLocaleString('en-US')} characters long, ${relation} the roughly 8,900 characters OpenFEMA accepts.`,
     { reason: 'request_too_long', urlLength, ...ctx.recoveryFor('request_too_long') },
+    { cause },
   );
 }
 
@@ -370,7 +376,7 @@ export class OpenFemaService {
     const version = await this.resolveVersion(dataset, ctx);
     // The catalog lists itself only as `DataSets`, so its `OpenFemaDataSets` alias is no listed name.
     const missing = dataset === CATALOG_DATASET ? notAtOpenFema : notServed;
-    const page = await this.request<T>(dataset, version, opts, ctx, missing, deadlineMs);
+    const page = await this.request<T>(dataset, version, opts, ctx, { missing, deadlineMs });
     const url = page.deprecation?.replacementUrl;
     const replacement = url ? this.catalog?.pages.get(pageKey(url)) : undefined;
     if (!replacement || replacement === dataset || !page.deprecation) return page;
@@ -385,22 +391,67 @@ export class OpenFemaService {
   fetchDisasters(
     opts: OpenFemaQueryOptions,
     ctx: Context,
-    { deadlineMs, signal }: { deadlineMs?: number; signal?: AbortSignal } = {},
+    options: { deadlineMs?: number; signal?: AbortSignal } = {},
   ): Promise<DatasetPage<RawDisasterDeclaration>> {
     return this.request<RawDisasterDeclaration>(
       'DisasterDeclarationsSummaries',
       2,
       opts,
       ctx,
-      notAtOpenFema,
-      deadlineMs,
-      signal,
+      options,
     );
   }
 
+  /** Read one disaster-wide funding summary under a two-second body-inclusive deadline. */
+  async fetchDisasterFunding(
+    disasterNumber: number,
+    ctx: Context,
+    signal: AbortSignal,
+  ): Promise<RawDisasterFunding | undefined> {
+    const { rows } = await this.exchange<unknown>(
+      'FemaWebDisasterSummaries',
+      1,
+      {
+        filter: `disasterNumber eq ${disasterNumber}`,
+        select: DISASTER_FUNDING_SELECT,
+        top: 1,
+      },
+      ctx,
+      {
+        signal: AbortSignal.any([ctx.signal, signal]),
+        timeoutMs: Math.min(this.timeoutMs, 2000),
+        missing: notAtOpenFema,
+        requireRows: true,
+      },
+    );
+    if (rows.length === 0) return;
+    const row = rawDisasterFundingSchema.safeParse(rows[0]);
+    if (!row.success)
+      throw serviceUnavailable('OpenFEMA returned an invalid disaster funding row.');
+    return row.data;
+  }
+
   /** Fetch public assistance funded project details. */
-  fetchPaProjects(opts: OpenFemaQueryOptions, ctx: Context): Promise<DatasetPage<RawPaProject>> {
-    return this.request<RawPaProject>('PublicAssistanceFundedProjectsDetails', 2, opts, ctx);
+  fetchPaProjects(
+    opts: OpenFemaQueryOptions,
+    ctx: Context,
+    signal?: AbortSignal,
+  ): Promise<DatasetPage<RawPaProject>> {
+    return this.request<RawPaProject>('PublicAssistanceFundedProjectsDetails', 2, opts, ctx, {
+      signal,
+    });
+  }
+
+  /** Fetch recipient names under the caller's shared lookup deadline. */
+  fetchPaApplicants(
+    opts: OpenFemaQueryOptions,
+    ctx: Context,
+    signal: AbortSignal,
+  ): Promise<DatasetPage<RawPaApplicant>> {
+    return this.request<RawPaApplicant>('PublicAssistanceApplicants', 1, opts, ctx, {
+      signal,
+      requireRows: true,
+    });
   }
 
   /** Fetch housing assistance — owners or renters. */
@@ -408,8 +459,9 @@ export class OpenFemaService {
     dataset: 'HousingAssistanceOwners' | 'HousingAssistanceRenters',
     opts: OpenFemaQueryOptions,
     ctx: Context,
+    signal?: AbortSignal,
   ): Promise<DatasetPage<RawHousingAssistance>> {
-    return this.request<RawHousingAssistance>(dataset, 2, opts, ctx);
+    return this.request<RawHousingAssistance>(dataset, 2, opts, ctx, { signal });
   }
 
   /** Fetch NFIP redacted claims (`NfipClaims` v3). */
@@ -418,7 +470,7 @@ export class OpenFemaService {
     ctx: Context,
     signal?: AbortSignal,
   ): Promise<DatasetPage<RawNfipClaim>> {
-    return this.request<RawNfipClaim>('NfipClaims', 3, opts, ctx, notAtOpenFema, undefined, signal);
+    return this.request<RawNfipClaim>('NfipClaims', 3, opts, ctx, { signal });
   }
 
   /** One count-only NFIP exchange, without retries, under a two-second body-inclusive deadline. */
@@ -524,9 +576,17 @@ export class OpenFemaService {
     version: number,
     opts: OpenFemaQueryOptions,
     ctx: Context,
-    missing: MissingEndpoint = notAtOpenFema,
-    deadlineMs = this.timeoutMs,
-    signal?: AbortSignal,
+    {
+      missing = notAtOpenFema,
+      deadlineMs = this.timeoutMs,
+      signal,
+      requireRows = false,
+    }: {
+      missing?: MissingEndpoint;
+      deadlineMs?: number | undefined;
+      signal?: AbortSignal | undefined;
+      requireRows?: boolean;
+    },
   ): Promise<DatasetPage<T>> {
     const queryParts = buildODataQueryParts(opts);
     return withRetry(
@@ -537,6 +597,7 @@ export class OpenFemaService {
             timeoutMs: Math.min(this.timeoutMs, remainingMs),
             missing,
             query: queryParts.join('&'),
+            requireRows,
           });
         } catch (error) {
           const status = error instanceof McpError ? error.data?.status : undefined;
@@ -570,12 +631,14 @@ export class OpenFemaService {
       missing,
       query = buildODataQueryParts(opts).join('&'),
       requireCount = false,
+      requireRows = false,
     }: {
       signal?: AbortSignal;
       timeoutMs: number;
       missing: MissingEndpoint;
       query?: string;
       requireCount?: boolean;
+      requireRows?: boolean;
     },
   ): Promise<DatasetPage<T>> {
     const url = `${this.apiRoot}/v${version}/${entity}?${query}`;
@@ -595,7 +658,7 @@ export class OpenFemaService {
         status === 404 ||
         (status === 400 && (headers?.['content-type']?.includes('html') || isHtmlResponse(body)))
       ) {
-        if (status === 400 && url.length > LONG_URL) throw requestTooLong(url.length, ctx);
+        if (status === 400 && url.length > LONG_URL) throw requestTooLong(url.length, ctx, error);
         throw missing(entity, ctx);
       }
       if (status === 400) {
@@ -608,11 +671,15 @@ export class OpenFemaService {
         const detail = parsed?.error?.[0];
         if (detail) {
           const { reason, message } = classifyODataError(detail, opts, entity);
-          throw validationError(message, {
-            reason,
-            ...(detail.code ? { code: detail.code } : {}),
-            ...ctx.recoveryFor(reason),
-          });
+          throw validationError(
+            message,
+            {
+              reason,
+              ...(detail.code ? { code: detail.code } : {}),
+              ...ctx.recoveryFor(reason),
+            },
+            { cause: error },
+          );
         }
       }
       throw error;
@@ -642,6 +709,12 @@ export class OpenFemaService {
       throw serviceUnavailable('OpenFEMA did not return a usable NFIP coverage count.');
     }
     // Data array is keyed by the entity name (e.g. "DisasterDeclarationsSummaries")
+    if (requireRows && !Array.isArray(envelope?.[entity])) {
+      throw serviceUnavailable('OpenFEMA did not return a dataset rows array.', {
+        dataset: entity,
+        retryable: false,
+      });
+    }
     const rows = (envelope[entity] as T[] | undefined) ?? [];
     // count is in envelope.metadata.count when $inlinecount=allpages is sent
     const count =

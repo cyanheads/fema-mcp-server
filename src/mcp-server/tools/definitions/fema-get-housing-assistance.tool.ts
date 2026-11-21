@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema, type ColumnSchema, type ColumnType } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
 import {
@@ -18,15 +19,25 @@ import {
   rowCharge,
   rowsWithinBudget,
 } from '@/mcp-server/tools/response-budget.js';
+import { getCanvas } from '@/services/canvas/canvas-accessor.js';
+import {
+  type AssistanceSource,
+  assistanceCanvasTableSchema,
+  assistanceDeadline,
+  renderAssistanceCanvas,
+  stageAssistance,
+} from '@/services/canvas/stage-assistance.js';
 import { anySubstringFilter, countySpellings } from '@/services/openfema/name-matcher.js';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 import type { RawHousingAssistance } from '@/services/openfema/types.js';
 import { US_STATES } from '@/services/openfema/us-states.js';
 
 const ZIP_CODE = /^\d{5}$/;
+const OWNERS = 'HousingAssistanceOwners';
+const RENTERS = 'HousingAssistanceRenters';
 
 /** Fields owner and renter records share, as the tool returns them. */
-interface AreaRecord {
+type AreaRecord = {
   approved_for_fema_assistance?: number | undefined;
   city?: string | undefined;
   county?: string | undefined;
@@ -39,20 +50,61 @@ interface AreaRecord {
   total_inspected?: number | undefined;
   valid_registrations?: number | undefined;
   zip_code?: string | undefined;
-}
+};
 
-interface OwnerRecord extends AreaRecord {
+type OwnerDamage = {
   average_fema_inspected_damage?: number | undefined;
   no_fema_inspected_damage?: number | undefined;
   total_damage?: number | undefined;
-}
+};
 
-interface RenterRecord extends AreaRecord {
+type RenterDamage = {
   total_inspected_with_no_damage?: number | undefined;
   total_with_major_damage?: number | undefined;
   total_with_moderate_damage?: number | undefined;
   total_with_substantial_damage?: number | undefined;
-}
+};
+
+type OwnerRecord = AreaRecord & OwnerDamage;
+type RenterRecord = AreaRecord & RenterDamage;
+
+const AREA_COLUMNS = {
+  disaster_number: 'INTEGER',
+  state: 'VARCHAR',
+  county: 'VARCHAR',
+  city: 'VARCHAR',
+  zip_code: 'VARCHAR',
+  approved_for_fema_assistance: 'INTEGER',
+  valid_registrations: 'INTEGER',
+  total_inspected: 'INTEGER',
+  total_approved_ihp_amount: 'DOUBLE',
+  repair_replace_amount: 'DOUBLE',
+  rental_amount: 'DOUBLE',
+  other_needs_amount: 'DOUBLE',
+} satisfies Record<keyof AreaRecord, ColumnType>;
+
+const OWNER_DAMAGE_COLUMNS = {
+  average_fema_inspected_damage: 'DOUBLE',
+  no_fema_inspected_damage: 'INTEGER',
+  total_damage: 'DOUBLE',
+} satisfies Record<keyof OwnerDamage, ColumnType>;
+
+const RENTER_DAMAGE_COLUMNS = {
+  total_inspected_with_no_damage: 'INTEGER',
+  total_with_major_damage: 'INTEGER',
+  total_with_moderate_damage: 'INTEGER',
+  total_with_substantial_damage: 'INTEGER',
+} satisfies Record<keyof RenterDamage, ColumnType>;
+
+const toColumns = (fields: Record<string, ColumnType>): ColumnSchema[] =>
+  Object.entries(fields).map(([name, type]) => ({
+    name,
+    type,
+    nullable: name !== 'disaster_number',
+  }));
+
+const OWNER_COLUMNS = toColumns({ ...AREA_COLUMNS, ...OWNER_DAMAGE_COLUMNS });
+const RENTER_COLUMNS = toColumns({ ...AREA_COLUMNS, ...RENTER_DAMAGE_COLUMNS });
 
 /** The lines owner and renter blocks share: location heading, state, counts, and amounts. */
 function areaLines(r: AreaRecord): string[] {
@@ -128,6 +180,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     'Narrow with state, county, or zip_code; owners_count, renters_count, and offset then count the filtered records. ' +
     'Use type to select owners, renters, or both (default). ' +
     'A page holds at most 100,000 characters of records, owners and renters cut at the same row count so one offset continues both; when records remain past it, next_offset is the offset to continue from. ' +
+    'When either dataset exceeds the first inline page and DataCanvas is enabled, stage each nonempty queried dataset for SQL in fema_dataframe_query. ' +
     'Use disaster_number from fema_search_disasters.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
@@ -183,6 +236,9 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       .describe(
         'Pagination offset into each queried dataset (default 0). Pass the previous page’s next_offset to continue both.',
       ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Reuse a canvas returned by an earlier call. Used only when staging from offset 0; omit to stage on a new canvas.',
+    ),
   }),
   output: z.object({
     owners: z
@@ -369,6 +425,21 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       .describe(
         'Total renter records matching the disaster and any state, county, or zip_code filter, before the per-dataset limit.',
       ),
+    spilled: z.boolean().describe('True when housing records were staged on DataCanvas.'),
+    canvas_id: z
+      .string()
+      .optional()
+      .describe(
+        'Canvas ID to pass to fema_dataframe_describe and fema_dataframe_query. Present only when spilled is true.',
+      ),
+    canvas_tables: z
+      .array(
+        assistanceCanvasTableSchema.describe('One table for a nonempty queried housing dataset.'),
+      )
+      .optional()
+      .describe(
+        'Dataset-to-table mapping: HousingAssistanceOwners holds owners and HousingAssistanceRenters holds renters. Present only when spilled is true.',
+      ),
   }),
   enrichment: {
     notice: z
@@ -436,9 +507,17 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       recovery:
         'Shorten county to the county name being searched for; stored county names are a few words long.',
     },
+    {
+      reason: 'canvas_not_found',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The canvas supplied for housing staging is missing or expired.',
+      recovery: 'Omit canvas_id to stage the same match on a fresh canvas.',
+    },
   ],
 
   async handler(input, ctx) {
+    const deadline = assistanceDeadline();
     if (input.state && !US_STATES.has(input.state)) {
       throw ctx.fail('invalid_state', `"${input.state}" is not a valid US state/territory code.`, {
         ...ctx.recoveryFor('invalid_state'),
@@ -470,7 +549,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
 
     const queryOpts = {
       filter,
-      orderby: 'totalApprovedIhpAmount desc',
+      orderby: 'totalApprovedIhpAmount desc,id',
       top: Math.min(input.limit, MAX_PAGE_ROWS),
       skip: input.offset,
     };
@@ -479,8 +558,8 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     const fetchRenters = input.type === 'renters' || input.type === 'both';
 
     const [ownersResult, rentersResult] = await Promise.all([
-      fetchOwners ? svc.fetchHousingAssistance('HousingAssistanceOwners', queryOpts, ctx) : null,
-      fetchRenters ? svc.fetchHousingAssistance('HousingAssistanceRenters', queryOpts, ctx) : null,
+      fetchOwners ? svc.fetchHousingAssistance(OWNERS, queryOpts, ctx) : null,
+      fetchRenters ? svc.fetchHousingAssistance(RENTERS, queryOpts, ctx) : null,
     ]);
 
     const ownersData = ownersResult?.rows ?? [];
@@ -590,6 +669,53 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
         ),
       );
     }
+
+    const canvas =
+      input.offset === 0 &&
+      returned > 0 &&
+      (ownersCount > owners.length || rentersCount > renters.length)
+        ? getCanvas()
+        : undefined;
+    const sources: AssistanceSource[] = [];
+    if (canvas) {
+      const source = (
+        dataset: typeof OWNERS | typeof RENTERS,
+        schema: ColumnSchema[],
+        count: number,
+        firstRows: (OwnerRecord | RenterRecord)[],
+        rawRows: RawHousingAssistance[],
+        mapRow: (row: RawHousingAssistance) => OwnerRecord | RenterRecord,
+      ): AssistanceSource => ({
+        dataset,
+        schema,
+        count,
+        firstRows,
+        firstKeys: rawRows.map((row) => row.id),
+        async fetchPage(top, skip, signal) {
+          const page = await svc.fetchHousingAssistance(
+            dataset,
+            { ...queryOpts, top, skip },
+            ctx,
+            signal,
+          );
+          return {
+            rows: page.rows.map(mapRow),
+            count: page.count,
+            keys: page.rows.map((row) => row.id),
+          };
+        },
+      });
+      if (ownersCount > 0)
+        sources.push(source(OWNERS, OWNER_COLUMNS, ownersCount, ownersAll, ownersData, mapOwner));
+      if (rentersCount > 0)
+        sources.push(
+          source(RENTERS, RENTER_COLUMNS, rentersCount, rentersAll, rentersData, mapRenter),
+        );
+    }
+    const staging = canvas
+      ? await stageAssistance(canvas, input.canvas_id, sources, ctx, deadline)
+      : undefined;
+    if (staging) notice.push(staging.notice);
     if (notice.length > 0) ctx.enrich.notice(notice.join(' '));
     ctx.log.info('Housing assistance fetch complete', {
       disasterNumber: input.disaster_number,
@@ -603,6 +729,9 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
       renters,
       owners_count: ownersCount,
       renters_count: rentersCount,
+      ...(staging?.spilled
+        ? { spilled: true, canvas_id: staging.canvas_id, canvas_tables: staging.canvas_tables }
+        : { spilled: false }),
     };
   },
 
@@ -611,6 +740,7 @@ export const femaGetHousingAssistance = tool('fema_get_housing_assistance', {
     const lines = [
       `**Owner records:** ${result.owners.length} of ${result.owners_count}`,
       `**Renter records:** ${result.renters.length} of ${result.renters_count}`,
+      ...renderAssistanceCanvas(result),
       '',
     ];
 

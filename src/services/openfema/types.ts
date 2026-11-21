@@ -3,6 +3,8 @@
  * @module services/openfema/types
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
+
 /**
  * `metadata.DeprecationInformation` on a deprecated dataset version. Past `depDate` OpenFEMA
  * keeps answering the version with HTTP 200 and its old count, but no records.
@@ -124,6 +126,23 @@ export interface RawDisasterDeclaration {
   state?: string;
 }
 
+/** The projected fields of one disaster-wide FemaWebDisasterSummaries v1 row. */
+export const rawDisasterFundingSchema = z.object({
+  totalNumberIaApproved: z.number().nullish(),
+  totalAmountIhpApproved: z.number().nullish(),
+  totalAmountHaApproved: z.number().nullish(),
+  totalAmountOnaApproved: z.number().nullish(),
+  totalObligatedAmountPa: z.number().nullish(),
+  totalObligatedAmountCatAb: z.number().nullish(),
+  totalObligatedAmountCatC2g: z.number().nullish(),
+  totalObligatedAmountHmgp: z.number().nullish(),
+  iaLoadDate: z.string().nullish(),
+  paLoadDate: z.string().nullish(),
+});
+
+/** Funding data from OpenFEMA before output normalization. */
+export type RawDisasterFunding = z.infer<typeof rawDisasterFundingSchema>;
+
 /** A public assistance funded project row. */
 export interface RawPaProject {
   applicantId?: string;
@@ -148,6 +167,13 @@ export interface RawPaProject {
   stateAbbreviation?: string;
   stateNumberCode?: string;
   totalObligated?: number;
+}
+
+/** The fields selected for joining PublicAssistanceApplicants v1 to project rows. */
+export interface RawPaApplicant {
+  applicantId?: string;
+  applicantName?: string;
+  disasterNumber?: number;
 }
 
 /** A housing assistance row for owners or renters. */
@@ -187,6 +213,7 @@ export interface RawNfipClaim {
   contentsDamageAmount?: number;
   countyCode?: string;
   dateOfLoss?: string;
+  floodEvent?: string | null;
   occupancyType?: number;
   ratedFloodZone?: string;
   reportedZipCode?: string;

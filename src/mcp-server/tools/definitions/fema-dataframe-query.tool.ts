@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tool: fema_dataframe_query — SQL SELECT against a DataCanvas table staged by fema_search_nfip.
+ * @fileoverview Tool: fema_dataframe_query — SQL over staged FEMA records.
  * @module mcp-server/tools/definitions/fema-dataframe-query
  */
 
@@ -19,16 +19,16 @@ import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 export const femaDataframeQuery = tool('fema_dataframe_query', {
   title: 'Query FEMA DataCanvas Table',
   description:
-    'Run a read-only SQL SELECT against a DataCanvas table staged by fema_search_nfip. ' +
-    'Enables aggregation, GROUP BY, SUM/COUNT, time-series, and filtered analysis over the full NFIP claims result ' +
+    'Query staged NFIP claims, PA projects, or housing records with read-only SQL. ' +
+    'Use GROUP BY, SUM, or COUNT to aggregate staged records ' +
     'without re-fetching from the API. ' +
     'Call fema_dataframe_describe first to get the exact table name and column names needed for valid SQL. ' +
-    'Only SELECT statements are allowed — DDL, DML, COPY, and file-reading functions are blocked. ' +
+    'Read-only queries can inspect columns with SHOW <table> and fill gaps with range() or generate_series() over constant arguments. DDL, DML, COPY, and file-reading functions are blocked. ' +
     'A response holds at most 100,000 characters of rows; when it holds fewer rows than the query returned, truncated and shown are set and the notice says how to page with OFFSET.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
-      'Canvas ID from the fema_search_nfip response (the canvas_id field).',
+      'Canvas ID returned by fema_search_nfip, fema_get_public_assistance, or fema_get_housing_assistance.',
     ),
     query: z
       .string()
@@ -94,14 +94,15 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       retryable: false,
       when: 'DataCanvas is disabled on this deployment (CANVAS_PROVIDER_TYPE is not set to duckdb).',
       recovery:
-        'DataCanvas is disabled on this deployment, so the fema_dataframe_* tools are unavailable. Use fema_search_nfip or fema_query_dataset — both return data without canvas staging. Self-hosted operators can enable it by setting CANVAS_PROVIDER_TYPE=duckdb.',
+        'DataCanvas is disabled on this deployment, so the fema_dataframe_* tools are unavailable. Page the matching records inline with the source tool. Self-hosted operators can enable it by setting CANVAS_PROVIDER_TYPE=duckdb.',
     },
     {
       reason: 'canvas_not_found',
       thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id does not correspond to an active canvas session.',
-      recovery: 'Re-run fema_search_nfip to stage a fresh canvas, then use the new canvas_id.',
+      recovery:
+        'Re-run the source tool at offset 0 to stage the records again and use its new canvas_id.',
     },
     {
       reason: 'missing_table',
@@ -109,7 +110,7 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The SELECT names a table that is not staged on this canvas — misspelled, dropped, or expired.',
       recovery:
-        'Call fema_dataframe_describe to list the staged tables, or re-run fema_search_nfip to stage the data again.',
+        'Call fema_dataframe_describe to list the staged tables, or re-run the source tool at offset 0 to stage the data again.',
     },
     {
       reason: SQL_GATE_REASONS.invalidSql,
@@ -123,7 +124,7 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       reason: SQL_GATE_REASONS.nonSelectStatement,
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The statement is not a SELECT (DDL, DML, PRAGMA, EXPLAIN, ATTACH) or cannot be parsed.',
+      when: 'The statement is not a supported read (DDL, DML, COPY, PRAGMA, EXPLAIN, ATTACH) or cannot be parsed.',
       recovery:
         'Rewrite the request as one read-only SELECT, or WITH … SELECT, over the staged table.',
     },
@@ -146,7 +147,7 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       reason: SQL_GATE_REASONS.planOperatorNotAllowed,
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The query plan uses an operator outside the read-only allowlist, such as a table function like range() or a system catalog like information_schema.',
+      when: 'The query plan uses an operator outside the read-only allowlist, such as a system catalog scan.',
       recovery:
         'Select from the staged table directly; call fema_dataframe_describe to list tables and columns instead of reading system catalogs.',
     },
@@ -154,7 +155,7 @@ export const femaDataframeQuery = tool('fema_dataframe_query', {
       reason: DUCKDB_ERROR_REASONS.sqlReadOnly,
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The statement writes or names a file, such as COPY … TO or a quoted file path in FROM.',
+      when: 'The statement names a file, such as a quoted file path in FROM.',
       recovery:
         'Query the staged tables by name; the canvas neither reads nor writes files on this server.',
     },

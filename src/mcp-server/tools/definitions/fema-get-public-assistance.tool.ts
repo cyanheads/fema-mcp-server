@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema, type ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
 import { renderJson, renderNotice, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
@@ -13,26 +14,96 @@ import {
   rowCharge,
   rowsWithinBudget,
 } from '@/mcp-server/tools/response-budget.js';
+import { getCanvas } from '@/services/canvas/canvas-accessor.js';
+import {
+  assistanceCanvasTableSchema,
+  assistanceDeadline,
+  renderAssistanceCanvas,
+  stageAssistance,
+} from '@/services/canvas/stage-assistance.js';
 import { anySubstringFilter, countySpellings } from '@/services/openfema/name-matcher.js';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
+import { paApplicantNames } from '@/services/openfema/pa-applicant-names.js';
+import type { RawPaProject } from '@/services/openfema/types.js';
 import { US_STATES } from '@/services/openfema/us-states.js';
 
 /** A project as the tool returns it. */
-interface Project {
+type Project = {
   applicant_id?: string | undefined;
+  applicant_name?: string | undefined;
   application_title?: string | undefined;
   county?: string | undefined;
+  county_fips?: string | undefined;
   damage_category_code?: string | undefined;
   damage_category_description?: string | undefined;
   disaster_number: number;
   federal_share_obligated?: number | undefined;
   first_obligation_date?: string | undefined;
+  last_obligation_date?: string | undefined;
+  mitigation_amount?: number | undefined;
   project_amount?: number | undefined;
+  project_process_step?: string | undefined;
   project_size?: string | undefined;
   project_status?: string | undefined;
   pw_number?: number | undefined;
   state?: string | undefined;
   total_obligated?: number | undefined;
+};
+
+const PA_COLUMNS: ColumnSchema[] = [
+  { name: 'disaster_number', type: 'INTEGER' },
+  { name: 'pw_number', type: 'INTEGER', nullable: true },
+  { name: 'applicant_id', type: 'VARCHAR', nullable: true },
+  { name: 'applicant_name', type: 'VARCHAR', nullable: true },
+  { name: 'application_title', type: 'VARCHAR', nullable: true },
+  { name: 'damage_category_code', type: 'VARCHAR', nullable: true },
+  { name: 'damage_category_description', type: 'VARCHAR', nullable: true },
+  { name: 'project_amount', type: 'DOUBLE', nullable: true },
+  { name: 'federal_share_obligated', type: 'DOUBLE', nullable: true },
+  { name: 'total_obligated', type: 'DOUBLE', nullable: true },
+  { name: 'mitigation_amount', type: 'DOUBLE', nullable: true },
+  { name: 'county', type: 'VARCHAR', nullable: true },
+  { name: 'county_fips', type: 'VARCHAR', nullable: true },
+  { name: 'state', type: 'VARCHAR', nullable: true },
+  { name: 'project_status', type: 'VARCHAR', nullable: true },
+  { name: 'project_process_step', type: 'VARCHAR', nullable: true },
+  { name: 'project_size', type: 'VARCHAR', nullable: true },
+  { name: 'first_obligation_date', type: 'VARCHAR', nullable: true },
+  { name: 'last_obligation_date', type: 'VARCHAR', nullable: true },
+];
+
+function mapProject(r: RawPaProject, applicantName: string | undefined): Project {
+  const { stateNumberCode, countyCode } = r;
+  const countyFips =
+    typeof stateNumberCode === 'string' &&
+    /^\d{1,2}$/.test(stateNumberCode) &&
+    typeof countyCode === 'string' &&
+    /^\d{1,3}$/.test(countyCode)
+      ? `${stateNumberCode.padStart(2, '0')}${countyCode.padStart(3, '0')}`
+      : undefined;
+  return {
+    disaster_number: r.disasterNumber ?? 0,
+    ...(r.pwNumber ? { pw_number: r.pwNumber } : {}),
+    ...(r.applicantId ? { applicant_id: r.applicantId } : {}),
+    ...(applicantName ? { applicant_name: applicantName } : {}),
+    ...(r.applicationTitle ? { application_title: r.applicationTitle } : {}),
+    ...(r.damageCategoryCode ? { damage_category_code: r.damageCategoryCode } : {}),
+    ...(r.damageCategoryDescrip ? { damage_category_description: r.damageCategoryDescrip } : {}),
+    ...(r.projectAmount != null ? { project_amount: r.projectAmount } : {}),
+    ...(r.federalShareObligated != null
+      ? { federal_share_obligated: r.federalShareObligated }
+      : {}),
+    ...(r.totalObligated != null ? { total_obligated: r.totalObligated } : {}),
+    ...(r.mitigationAmount != null ? { mitigation_amount: r.mitigationAmount } : {}),
+    ...(r.county ? { county: r.county } : {}),
+    ...(countyFips ? { county_fips: countyFips } : {}),
+    ...(r.stateAbbreviation ? { state: r.stateAbbreviation } : {}),
+    ...(r.projectStatus ? { project_status: r.projectStatus } : {}),
+    ...(r.projectProcessStep ? { project_process_step: r.projectProcessStep } : {}),
+    ...(r.projectSize ? { project_size: r.projectSize } : {}),
+    ...(r.firstObligationDate ? { first_obligation_date: r.firstObligationDate } : {}),
+    ...(r.lastObligationDate ? { last_obligation_date: r.lastObligationDate } : {}),
+  };
 }
 
 /** The text block `format()` renders for one project — also what the response budget charges it. */
@@ -42,6 +113,7 @@ function renderProject(p: Project): string {
   lines.push(`## ${literal(title)}`);
   lines.push(`**Disaster:** #${p.disaster_number}`);
   if (p.applicant_id) lines.push(`**Applicant ID:** ${literal(p.applicant_id)}`);
+  if (p.applicant_name) lines.push(`**Applicant Name:** ${literal(p.applicant_name)}`);
   if (p.damage_category_code) {
     lines.push(
       `**Damage Category:** ${literal(p.damage_category_code)}${p.damage_category_description ? ` — ${literal(p.damage_category_description)}` : ''}`,
@@ -56,15 +128,24 @@ function renderProject(p: Project): string {
   if (p.project_amount != null) {
     lines.push(`**Project Amount:** $${p.project_amount.toLocaleString()}`);
   }
+  if (p.mitigation_amount != null) {
+    lines.push(
+      `**Mitigation Amount:** $${p.mitigation_amount.toLocaleString('en-US', { maximumFractionDigits: 20 })}`,
+    );
+  }
   const meta: string[] = [];
   if (p.project_status) meta.push(`Status: ${literal(p.project_status)}`);
   if (p.project_size) meta.push(`Size: ${literal(p.project_size)}`);
   if (p.county) meta.push(`County: ${literal(p.county)}`);
+  if (p.county_fips) meta.push(`County FIPS: ${literal(p.county_fips)}`);
   if (p.state) meta.push(`State: ${literal(p.state)}`);
   if (p.pw_number) meta.push(`PW: ${p.pw_number}`);
   if (meta.length > 0) lines.push(meta.join(' | '));
   if (p.first_obligation_date)
     lines.push(`**First Obligated:** ${literal(p.first_obligation_date)}`);
+  if (p.last_obligation_date) lines.push(`**Last Obligated:** ${literal(p.last_obligation_date)}`);
+  if (p.project_process_step)
+    lines.push(`**Project Process Step:** ${literal(p.project_process_step)}`);
   return lines.join('\n');
 }
 
@@ -76,12 +157,7 @@ const MAX_PAGE_ROWS = maxRowsWithinBudget(projectCharge({ disaster_number: 0 }))
 export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
   title: 'Get FEMA Public Assistance Projects',
   description:
-    'Retrieve Public Assistance (PA) funded project records for a disaster or state — shows where federal recovery money was obligated. ' +
-    'Returns applicant, damage category, project size and status, federal share obligated, and total obligated amounts. ' +
-    'Either disaster_number or state must be provided. ' +
-    'Use disaster_number (from fema_search_disasters) to scope to a single declaration, or state to browse all PA projects for a state. ' +
-    'PA projects are created only when the PA program is declared (pa_declared: true on the disaster). ' +
-    'A page holds at most 100,000 characters of projects; when projects remain past it, next_offset is the offset to continue from.',
+    'Retrieve Public Assistance (PA) funded project records, including recipient name, damage category, project status, and federal obligations. Supply disaster_number from fema_search_disasters or a state code. A page holds up to 100,000 characters of projects. Use next_offset to continue. With DataCanvas enabled, an overflowing first page also stages up to 50,000 matching rows for fema_dataframe_query.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     disaster_number: z
@@ -119,6 +195,9 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       .min(0)
       .default(0)
       .describe('Pagination offset (default 0). Pass the previous page’s next_offset to continue.'),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Reuse a canvas returned by an earlier call. Used only when staging from offset 0; omit to stage on a new canvas.',
+    ),
   }),
   output: z.object({
     projects: z
@@ -136,10 +215,16 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
               .describe(
                 'FEMA applicant identifier for the recipient organization. Absent when not recorded.',
               ),
+            applicant_name: z
+              .string()
+              .optional()
+              .describe(
+                'Recipient organization name from the applicant record for this disaster and applicant ID.',
+              ),
             application_title: z
               .string()
               .optional()
-              .describe('Name of the applicant organization or project. Absent when not recorded.'),
+              .describe("The application's free-form project title. Absent when not recorded."),
             damage_category_code: z
               .string()
               .optional()
@@ -174,6 +259,12 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
               .string()
               .optional()
               .describe('County where the project is located. Absent when not recorded.'),
+            county_fips: z
+              .string()
+              .optional()
+              .describe(
+                'Five-digit county FIPS code, including leading zeros. Absent when either component is unavailable.',
+              ),
             state: z
               .string()
               .optional()
@@ -184,6 +275,10 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
               .describe(
                 'Eligibility status of the project: Eligible (nearly all projects), Pending Eligibility Review, Ineligible, or Withdrawn. Absent when not set.',
               ),
+            project_process_step: z
+              .string()
+              .optional()
+              .describe('Current FEMA project workflow step. Absent when not recorded.'),
             project_size: z
               .string()
               .optional()
@@ -196,6 +291,18 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
               .describe(
                 'ISO 8601 date the first federal obligation was recorded. Absent before obligation.',
               ),
+            last_obligation_date: z
+              .string()
+              .optional()
+              .describe(
+                'ISO 8601 date the latest federal obligation was recorded. Absent before obligation.',
+              ),
+            mitigation_amount: z
+              .number()
+              .optional()
+              .describe(
+                'Proposed Section 406 mitigation amount in USD, including zero and negative adjustments.',
+              ),
           })
           .describe('A single Public Assistance funded project record.'),
       )
@@ -204,13 +311,21 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       ),
     total_count: z.number().describe('Total matching projects before pagination.'),
     returned_count: z.number().describe('Number of projects in this response.'),
+    spilled: z.boolean().describe('Whether the filtered match was staged on a DataCanvas.'),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Canvas ID for querying the staged projects. Present after successful staging.',
+    ),
+    canvas_tables: z
+      .array(assistanceCanvasTableSchema.describe('One staged Public Assistance project table.'))
+      .optional()
+      .describe('Staged table metadata. Present after successful staging.'),
   }),
   enrichment: {
     notice: z
       .string()
       .optional()
       .describe(
-        'Zero-match guidance for supplied filters and declared programs, or paging guidance: the continuation offset and whether limit or the response budget ended the page, or the last valid offset for a nonzero total.',
+        'Guidance on missing matches, inline continuation, incomplete applicant names, or DataCanvas staging.',
       ),
     next_offset: z
       .number()
@@ -259,9 +374,17 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
       recovery:
         'Shorten county to the county name being searched for; stored county names are a few words long.',
     },
+    {
+      reason: 'canvas_not_found',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The canvas supplied for PA staging is missing or expired.',
+      recovery: 'Omit canvas_id to stage the same match on a fresh canvas.',
+    },
   ],
 
   async handler(input, ctx) {
+    const deadline = assistanceDeadline();
     if (input.state && !US_STATES.has(input.state)) {
       throw ctx.fail('invalid_state', `"${input.state}" is not a valid US state/territory code.`, {
         ...ctx.recoveryFor('invalid_state'),
@@ -294,34 +417,22 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     if (counties.length > 0) filterParts.push(anySubstringFilter('county', counties));
 
     const svc = getOpenFemaService();
+    const query = {
+      filter: filterParts.join(' and '),
+      orderby: 'totalObligated desc,gmProjectId,hash',
+    };
     const { rows, count } = await svc.fetchPaProjects(
       {
-        filter: filterParts.join(' and '),
-        orderby: 'totalObligated desc',
+        ...query,
         top: Math.min(input.limit, MAX_PAGE_ROWS),
         skip: input.offset,
       },
       ctx,
     );
-
-    const fetched: Project[] = rows.map((r) => ({
-      disaster_number: r.disasterNumber ?? 0,
-      ...(r.pwNumber ? { pw_number: r.pwNumber } : {}),
-      ...(r.applicantId ? { applicant_id: r.applicantId } : {}),
-      ...(r.applicationTitle ? { application_title: r.applicationTitle } : {}),
-      ...(r.damageCategoryCode ? { damage_category_code: r.damageCategoryCode } : {}),
-      ...(r.damageCategoryDescrip ? { damage_category_description: r.damageCategoryDescrip } : {}),
-      ...(r.projectAmount != null ? { project_amount: r.projectAmount } : {}),
-      ...(r.federalShareObligated != null
-        ? { federal_share_obligated: r.federalShareObligated }
-        : {}),
-      ...(r.totalObligated != null ? { total_obligated: r.totalObligated } : {}),
-      ...(r.county ? { county: r.county } : {}),
-      ...(r.stateAbbreviation ? { state: r.stateAbbreviation } : {}),
-      ...(r.projectStatus ? { project_status: r.projectStatus } : {}),
-      ...(r.projectSize ? { project_size: r.projectSize } : {}),
-      ...(r.firstObligationDate ? { first_obligation_date: r.firstObligationDate } : {}),
-    }));
+    const names = paApplicantNames(svc, ctx, deadline);
+    await names.load(rows);
+    const project = (row: RawPaProject) => mapProject(row, names.get(row));
+    const fetched = rows.map(project);
 
     const returned = rowsWithinBudget(fetched.length, (i) =>
       projectCharge(fetched[i] ?? { disaster_number: 0 }),
@@ -330,12 +441,13 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
     const nextOffset = input.offset + returned;
 
     ctx.enrich.total(count);
+    const notices: string[] = [];
     if (count === 0) {
       const filters = [
         input.county?.trim() && 'county',
         input.state && input.disaster_number && 'state',
       ].filter(Boolean);
-      ctx.enrich.notice(
+      notices.push(
         'No PA projects matched the filters. ' +
           (filters.length > 0 ? `Broaden the search by removing ${filters.join(' or ')}. ` : '') +
           (input.disaster_number
@@ -343,12 +455,12 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
             : 'Try a different state, or search again later; project records may not yet be published.'),
       );
     } else if (projects.length === 0) {
-      ctx.enrich.notice(
+      notices.push(
         `Offset ${input.offset} is past the end of the ${count} matching PA projects; the last valid offset is ${count - 1}.`,
       );
     } else if (nextOffset < count) {
       ctx.enrich({ next_offset: nextOffset });
-      ctx.enrich.notice(
+      notices.push(
         continuationNotice(
           `${returned} of the ${count} matching PA projects`,
           input.offset,
@@ -357,14 +469,56 @@ export const femaGetPublicAssistance = tool('fema_get_public_assistance', {
         ),
       );
     }
+    const canvas =
+      input.offset === 0 && returned > 0 && nextOffset < count ? getCanvas() : undefined;
+    const staging = canvas
+      ? await stageAssistance(
+          canvas,
+          input.canvas_id,
+          [
+            {
+              dataset: 'PublicAssistanceFundedProjectsDetails',
+              schema: PA_COLUMNS,
+              count,
+              firstRows: fetched,
+              firstKeys: rows.map((row) => row.hash),
+              async fetchPage(top, skip, signal) {
+                const page = await svc.fetchPaProjects({ ...query, top, skip }, ctx, signal);
+                await names.load(page.rows, signal);
+                return {
+                  rows: page.rows.map(project),
+                  count: page.count,
+                  keys: page.rows.map((row) => row.hash),
+                };
+              },
+            },
+          ],
+          ctx,
+          deadline,
+        )
+      : undefined;
+    if (names.incomplete) notices.push('Some PA applicant names could not be looked up.');
+    if (staging) notices.push(staging.notice);
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
     ctx.log.info('PA projects fetch complete', { count, returned, fetched: fetched.length });
-    return { projects, total_count: count, returned_count: returned };
+    return {
+      projects,
+      total_count: count,
+      returned_count: returned,
+      ...(staging?.spilled
+        ? { spilled: true, canvas_id: staging.canvas_id, canvas_tables: staging.canvas_tables }
+        : { spilled: false }),
+    };
   },
 
   format: (result) => {
     if (requiresJson(result)) return [{ type: 'text', text: renderJson(result) }];
     const lines: string[] = [];
-    lines.push(`**${result.returned_count} of ${result.total_count} PA projects**\n`);
+    lines.push(
+      `**${result.returned_count} of ${result.total_count} PA projects**`,
+      ...renderAssistanceCanvas(result),
+      '',
+    );
     for (const p of result.projects) lines.push(renderProject(p), '');
     return [{ type: 'text', text: lines.join('\n') }];
   },

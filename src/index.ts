@@ -64,5 +64,5 @@ await createApp({
     setCanvas(core.canvas);
   },
   instructions:
-    'Start with fema_search_disasters and use the disaster number to join declarations with public and housing assistance. NFIP claims carry no disaster number: scope them by state (required), 5-digit county FIPS, and loss year; when results include a canvas_id, inspect columns with fema_dataframe_describe before querying with fema_dataframe_query. Use fema_query_dataset for any other dataset in the OpenFEMA catalog; dataset DataSets lists the catalog names. The fema-guide skill carries the gates for county naming across datasets, dollar totals, and OData filter syntax.',
+    'Use fema_search_disasters to find a disaster number, fema_get_disaster for funding totals, and the assistance tools for project or housing records. Scope NFIP claims by state and add the stored flood_event spelling to select a named event. When a tool returns canvas_id, inspect the tables with fema_dataframe_describe before querying them. Use fema_query_dataset for other OpenFEMA datasets. The fema-guide skill covers county naming, identifiers, dollar totals, and OData filters.',
 });

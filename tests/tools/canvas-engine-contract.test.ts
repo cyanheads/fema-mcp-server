@@ -21,11 +21,7 @@ function contentText(result: { content: unknown[] }): string {
   return (result.content as Array<{ text?: string }>).map((block) => block.text ?? '').join('\n');
 }
 
-/**
- * A canvas on the server's default export root. A root that contains the working directory
- * would let the engine reach a relative file path, so a COPY would fail the statement-type
- * gate instead of the engine's file-access refusal a deployment returns.
- */
+/** A canvas on the server's default export root. */
 function newCanvas() {
   const provider = new DuckdbProvider({
     defaultRowLimit: 100,
@@ -111,14 +107,63 @@ describe('fema_dataframe_query against a real DuckDB canvas', () => {
       { context: { tenantId: 'default' } },
     );
 
+  it('shows the columns of a staged table', async () => {
+    const result = await run('SHOW claims');
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      row_count: 2,
+      rows: [
+        { column_name: 'county_code', column_type: 'VARCHAR' },
+        { column_name: 'amount', column_type: 'VARCHAR' },
+      ],
+    });
+    expect(renderedText(contentText(result))).toEqual(
+      expect.arrayContaining(['column_name', 'column_type', 'county_code', 'amount', 'VARCHAR']),
+    );
+  });
+
+  it.each(['range(1, 3)', 'generate_series(1, 2)'])(
+    'uses %s to group staged claims by integer amount',
+    async (series) => {
+      const result = await run(
+        `WITH amounts AS (SELECT value FROM ${series} AS s(value))
+         SELECT value AS amount, COUNT(claims.amount) AS claims
+         FROM amounts LEFT JOIN claims ON value = CAST(claims.amount AS INTEGER)
+         GROUP BY value ORDER BY value`,
+      );
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        row_count: 2,
+        rows: [
+          { amount: '1', claims: '0' },
+          { amount: '2', claims: '1' },
+        ],
+      });
+      expect(renderedText(contentText(result))).toEqual([
+        `2 rows | Canvas: ${canvasId}`,
+        'amount',
+        'claims',
+        '1',
+        '0',
+        '2',
+        '1',
+      ]);
+    },
+  );
+
   it.each([
     ['invalid_sql', JsonRpcErrorCode.ValidationError, 'SELECT flood_zone FROM claims'],
     ['missing_table', JsonRpcErrorCode.NotFound, 'SELECT * FROM no_such_table'],
     ['non_select_statement', JsonRpcErrorCode.ValidationError, 'DROP TABLE claims'],
     ['multi_statement', JsonRpcErrorCode.ValidationError, 'SELECT 1; SELECT 2'],
     ['denied_function', JsonRpcErrorCode.ValidationError, "SELECT current_setting('threads')"],
-    ['plan_operator_not_allowed', JsonRpcErrorCode.ValidationError, 'SELECT * FROM range(3)'],
-    ['sql_read_only', JsonRpcErrorCode.ValidationError, "COPY (SELECT 1) TO 'x.csv'"],
+    [
+      'plan_operator_not_allowed',
+      JsonRpcErrorCode.ValidationError,
+      'SELECT * FROM information_schema.tables',
+    ],
+    ['sql_read_only', JsonRpcErrorCode.ValidationError, "SELECT * FROM 'claims.csv'"],
+    ['non_select_statement', JsonRpcErrorCode.ValidationError, "COPY (SELECT 1) TO 'x.csv'"],
     [
       'sql_execution_error',
       JsonRpcErrorCode.ValidationError,

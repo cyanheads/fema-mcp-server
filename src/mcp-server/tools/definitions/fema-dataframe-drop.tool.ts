@@ -13,7 +13,7 @@ import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
   title: 'Drop FEMA DataCanvas Table',
   description:
-    'Permanently remove one table or view from a DataCanvas staged by fema_search_nfip. ' +
+    'Permanently remove one table or view from a FEMA DataCanvas. ' +
     'This only deletes staged analytical data; it never changes FEMA source data. ' +
     'Call fema_dataframe_describe first to get the exact table or view name.',
   annotations: {
@@ -23,7 +23,9 @@ const femaDataframeDropDefinition = tool('fema_dataframe_drop', {
     openWorldHint: false,
   },
   input: z.object({
-    canvas_id: CanvasIdSchema.describe('Canvas ID from the fema_search_nfip response.'),
+    canvas_id: CanvasIdSchema.describe(
+      'Canvas ID returned by fema_search_nfip, fema_get_public_assistance, or fema_get_housing_assistance.',
+    ),
     table_name: z
       .string()
       .describe('Exact table or view name returned by fema_dataframe_describe.'),

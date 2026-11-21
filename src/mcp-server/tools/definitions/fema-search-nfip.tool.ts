@@ -35,9 +35,9 @@ const MAX_CANVAS_ROWS = 50_000;
  * many small ones.
  */
 const PAGE_SIZE = 5000;
-/** The 12 fields the tool reads — everything a response or canvas table carries. */
+/** The fields the tool reads and carries through to inline and staged claims. */
 const NFIP_SELECT =
-  'state,countyCode,reportedZipCode,dateOfLoss,yearOfLoss,amountPaidOnBuildingClaim,amountPaidOnContentsClaim,buildingDamageAmount,contentsDamageAmount,ratedFloodZone,causeOfDamage,occupancyType';
+  'state,countyCode,reportedZipCode,dateOfLoss,yearOfLoss,amountPaidOnBuildingClaim,amountPaidOnContentsClaim,buildingDamageAmount,contentsDamageAmount,ratedFloodZone,causeOfDamage,occupancyType,floodEvent';
 /** A total order: `id` breaks date ties, so offset pages neither repeat nor skip a claim. */
 const NFIP_ORDERBY = 'dateOfLoss desc,id';
 
@@ -144,6 +144,7 @@ const NFIP_CANVAS_SCHEMA: ColumnSchema[] = [
   { name: 'rated_flood_zone', type: 'VARCHAR', nullable: true },
   { name: 'cause_of_damage', type: 'VARCHAR', nullable: true },
   { name: 'occupancy_type', type: 'INTEGER', nullable: true },
+  { name: 'flood_event', type: 'VARCHAR', nullable: true },
 ];
 
 /**
@@ -166,6 +167,7 @@ type CanvasRow = {
   rated_flood_zone: string | null;
   cause_of_damage: string | null;
   occupancy_type: number | null;
+  flood_event: string | null;
 };
 
 /** One claim's actual escaped inline representation, shared by formatting and budget accounting. */
@@ -176,6 +178,7 @@ function renderClaim(c: { [K in keyof CanvasRow]?: CanvasRow[K] | undefined }): 
   if (c.zip_code) parts.push(`ZIP: ${literal(c.zip_code)}`);
   if (c.date_of_loss) parts.push(`Loss: ${literal(c.date_of_loss)}`);
   if (c.year_of_loss != null) parts.push(`Year: ${c.year_of_loss}`);
+  if (c.flood_event != null) parts.push(`Event: ${literal(c.flood_event)}`);
   if (c.rated_flood_zone) parts.push(`Zone: ${literal(c.rated_flood_zone)}`);
   if (c.cause_of_damage) parts.push(`Cause: ${literal(c.cause_of_damage)}`);
   if (c.occupancy_type) parts.push(`Occupancy: ${c.occupancy_type}`);
@@ -220,6 +223,7 @@ function toCanvasRow(r: RawNfipClaim): CanvasRow {
     rated_flood_zone: r.ratedFloodZone ?? null,
     cause_of_damage: r.causeOfDamage ?? null,
     occupancy_type: r.occupancyType ?? null,
+    flood_event: r.floodEvent ?? null,
   };
 }
 
@@ -242,6 +246,7 @@ function toOutputRow(r: CanvasRow) {
     ...(r.rated_flood_zone != null ? { rated_flood_zone: r.rated_flood_zone } : {}),
     ...(r.cause_of_damage != null ? { cause_of_damage: r.cause_of_damage } : {}),
     ...(r.occupancy_type != null ? { occupancy_type: r.occupancy_type } : {}),
+    ...(r.flood_event != null ? { flood_event: r.flood_event } : {}),
   };
 }
 
@@ -263,7 +268,7 @@ function withinBudget(rows: CanvasRow[]): CanvasRow[] {
 
 /**
  * No canvas row serializes shorter than one of empty strings and single-digit numbers, so no
- * page larger than this can fit the budget (409 rows). A full canvas page always overflows it.
+ * page larger than this can fit the budget. A full canvas page always overflows it.
  */
 const MAX_BUDGET_ROWS = Math.floor(
   PREVIEW_CHARS /
@@ -277,7 +282,7 @@ const MAX_BUDGET_ROWS = Math.floor(
 export const femaSearchNfip = tool('fema_search_nfip', {
   title: 'Search NFIP Flood Insurance Claims',
   description:
-    'Search National Flood Insurance Program (NFIP) claims data by state, county, ZIP code, and year range. ' +
+    'Search National Flood Insurance Program (NFIP) claims data by state, county, ZIP code, year range, and exact flood event name. ' +
     'Returns the matching claim count and claim records — amounts paid on building and contents, damage estimates, flood zones, cause and occupancy codes, and loss dates — newest loss first. ' +
     'state is required — the full NFIP dataset is 2.7 million rows; unfiltered access is prohibited. ' +
     'Page the inline claims with limit and offset; a page holds at most 100,000 characters of claims, and while claims remain past it, next_offset is the offset to continue from. ' +
@@ -318,6 +323,13 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .max(2100)
       .optional()
       .describe('End year of loss, inclusive (e.g., 2023). Equal to year_from for a single year.'),
+    flood_event: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'FEMA flood event name as stored, including spelling and case (e.g., Hurricane Harvey). Omit to include claims with and without an event name.',
+      ),
     limit: z
       .number()
       .int()
@@ -366,6 +378,10 @@ export const femaSearchNfip = tool('fema_search_nfip', {
               .number()
               .optional()
               .describe('Calendar year the flood loss occurred. Absent when not recorded.'),
+            flood_event: z
+              .string()
+              .optional()
+              .describe('Flood event name as recorded by FEMA. Absent when unnamed.'),
             amount_paid_building: z
               .number()
               .optional()
@@ -455,7 +471,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       .string()
       .optional()
       .describe(
-        'Zero-match, paging, and canvas guidance, composed with county-coverage disclosure: a state/year count of claims without county codes when already available, or an unchecked-coverage notice; this count does not identify any county or ZIP.',
+        'Zero-match, paging, and canvas guidance, composed with county-coverage disclosure. The count of claims without county codes, when available, covers the selected state, years, and event and does not identify any county or ZIP.',
       ),
     next_offset: z
       .number()
@@ -549,6 +565,11 @@ export const femaSearchNfip = tool('fema_search_nfip', {
     if (input.year_to != null) {
       filterParts.push(`yearOfLoss le ${input.year_to}`);
     }
+    const eventFilter =
+      input.flood_event === undefined
+        ? undefined
+        : `floodEvent eq '${escapeODataString(input.flood_event)}'`;
+    if (eventFilter) filterParts.push(eventFilter);
 
     const svc = getOpenFemaService();
     const query = { filter: filterParts.join(' and '), select: NFIP_SELECT, orderby: NFIP_ORDERBY };
@@ -580,6 +601,7 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       const coverageFilter = [`state eq '${escapeODataString(input.state)}'`, 'countyCode eq null'];
       if (input.year_from != null) coverageFilter.push(`yearOfLoss ge ${input.year_from}`);
       if (input.year_to != null) coverageFilter.push(`yearOfLoss le ${input.year_to}`);
+      if (eventFilter) coverageFilter.push(eventFilter);
       void svc.countNfipMissingCounty(coverageFilter.join(' and '), ctx, auxiliary.signal).then(
         (count) => {
           missingCountyCount = count;
@@ -599,13 +621,15 @@ export const femaSearchNfip = tool('fema_search_nfip', {
       },
     );
     ctx.signal.throwIfAborted();
-    const coverageScope = `${input.state} (${input.year_from != null && input.year_to != null ? `${input.year_from}–${input.year_to}` : input.year_from != null ? `from ${input.year_from}` : input.year_to != null ? `through ${input.year_to}` : 'all years'})`;
+    const eventScope =
+      input.flood_event === undefined ? '' : ` for flood event "${input.flood_event}"`;
+    const coverageScope = `${input.state} (${input.year_from != null && input.year_to != null ? `${input.year_from}–${input.year_to}` : input.year_from != null ? `from ${input.year_from}` : input.year_to != null ? `through ${input.year_to}` : 'all years'})${eventScope}`;
     const coverage =
       !countyCode || coverageCount === 0
         ? ''
         : coverageCount === undefined
           ? `Missing-county coverage for ${coverageScope} was not checked; claims without countyCode cannot match county_code.`
-          : `${coverageCount.toLocaleString('en-US')} claims in ${coverageScope} have no countyCode and cannot match county_code. This state/year count does not identify their county or ZIP. Remove county_code to include them, optionally searching known ZIPs; ZIP results are not guaranteed complete or equivalent to the county.`;
+          : `${coverageCount.toLocaleString('en-US')} claims in ${coverageScope} have no countyCode and cannot match county_code. This ${eventFilter ? 'state/year/event' : 'state/year'} count does not identify their county or ZIP. Remove county_code to include them, optionally searching known ZIPs; ZIP results are not guaranteed complete or equivalent to the county.`;
     const notice = (message: string) =>
       ctx.enrich.notice([message, coverage].filter(Boolean).join(' '));
     const total = first.count;
@@ -617,10 +641,12 @@ export const femaSearchNfip = tool('fema_search_nfip', {
         (input.year_from != null || input.year_to != null) && 'year range',
       ].filter(Boolean);
       notice(
-        `No NFIP claims matched the filters for ${input.state}. ` +
-          (filters.length > 0
-            ? `Broaden the search by removing or widening ${filters.join(', ')}.`
-            : 'Try a different state or search again later.') +
+        `No NFIP claims matched the filters for ${input.state}${eventScope}. ` +
+          (eventFilter
+            ? 'The event name must match FEMA’s spelling and case exactly. Remove flood_event and search a relevant year range at offset 0. If the match stays inline, page with next_offset to inspect flood_event; if it stages, use GROUP BY flood_event in fema_dataframe_query to inspect names in the staged rows.'
+            : filters.length > 0
+              ? `Broaden the search by removing or widening ${filters.join(', ')}.`
+              : 'Try a different state or search again later.') +
           (mismatch ? ` ${mismatch}` : ''),
       );
       return { claims: [], total_count: 0, returned_count: 0, spilled: false };

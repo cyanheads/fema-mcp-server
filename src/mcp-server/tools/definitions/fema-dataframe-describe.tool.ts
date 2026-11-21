@@ -1,5 +1,5 @@
 /**
- * @fileoverview Tool: fema_dataframe_describe — describe tables on a DataCanvas staged by fema_search_nfip.
+ * @fileoverview Tool: fema_dataframe_describe — describe staged FEMA tables on a DataCanvas.
  * @module mcp-server/tools/definitions/fema-dataframe-describe
  */
 
@@ -13,12 +13,14 @@ import { getCanvas } from '@/services/canvas/canvas-accessor.js';
 export const femaDataframeDescribe = tool('fema_dataframe_describe', {
   title: 'Describe FEMA DataCanvas Tables',
   description:
-    'List tables and column schemas on a DataCanvas staged by fema_search_nfip. ' +
+    'List tables and column schemas for staged NFIP claims, PA projects, and housing records. ' +
     'Call this before fema_dataframe_query to discover the exact table name, column names, and DuckDB data types needed to write valid SQL. ' +
-    'Row count reflects what was actually staged — check truncated in the fema_search_nfip response to know whether the canvas holds the full matching set.',
+    'Compare each staged count with the source tool’s total before using it for a full-match aggregate.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
-    canvas_id: CanvasIdSchema.describe('Canvas ID from the fema_search_nfip response.'),
+    canvas_id: CanvasIdSchema.describe(
+      'Canvas ID returned by fema_search_nfip, fema_get_public_assistance, or fema_get_housing_assistance.',
+    ),
   }),
   output: z.object({
     tables: z
@@ -72,7 +74,8 @@ export const femaDataframeDescribe = tool('fema_dataframe_describe', {
       thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id does not correspond to an active canvas session.',
-      recovery: 'Re-run fema_search_nfip to stage a fresh canvas, then use the new canvas_id.',
+      recovery:
+        'Re-run the source tool at offset 0 to stage the records again and use its new canvas_id.',
     },
     {
       reason: 'canvas_unavailable',
@@ -80,7 +83,7 @@ export const femaDataframeDescribe = tool('fema_dataframe_describe', {
       retryable: false,
       when: 'DataCanvas is disabled on this deployment (CANVAS_PROVIDER_TYPE is not set to duckdb).',
       recovery:
-        'DataCanvas is disabled on this deployment, so the fema_dataframe_* tools are unavailable. Use fema_search_nfip or fema_query_dataset — both return data without canvas staging. Self-hosted operators can enable it by setting CANVAS_PROVIDER_TYPE=duckdb.',
+        'DataCanvas is disabled on this deployment, so the fema_dataframe_* tools are unavailable. Page the matching records inline with the source tool. Self-hosted operators can enable it by setting CANVAS_PROVIDER_TYPE=duckdb.',
     },
   ],
 

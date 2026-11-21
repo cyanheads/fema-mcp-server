@@ -3,12 +3,14 @@
  * @module tests/tools/fema-get-housing-assistance.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { CanvasRegistry, DataCanvas, DuckdbProvider } from '@cyanheads/mcp-ts-core/canvas';
+import { forbidden, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import MarkdownIt from 'markdown-it';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 import { femaGetHousingAssistance } from '@/mcp-server/tools/definitions/fema-get-housing-assistance.tool.js';
+import { setCanvas } from '@/services/canvas/canvas-accessor.js';
 import { markdown, renderedText } from '../helpers/rendered-markdown.js';
 
 // Only the service accessor is stubbed: the county matcher runs the real escapeODataString.
@@ -62,6 +64,23 @@ function makeRenterRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+async function withHousingCanvas(run: (canvas: DataCanvas) => Promise<void>) {
+  const provider = new DuckdbProvider({
+    defaultRowLimit: 100,
+    exportRootPath: './.canvas-exports',
+    memoryLimitMb: 64,
+    schemaSniffRows: 10,
+  });
+  const canvas = new DataCanvas(provider, new CanvasRegistry(provider));
+  setCanvas(canvas);
+  try {
+    await run(canvas);
+  } finally {
+    setCanvas(undefined);
+    await canvas.shutdown(createMockContext());
+  }
+}
+
 describe('femaGetHousingAssistance', () => {
   beforeEach(async () => {
     await setMock({
@@ -103,6 +122,257 @@ describe('femaGetHousingAssistance', () => {
     const result = await femaGetHousingAssistance.handler(input, ctx);
     expect(result.owners).toHaveLength(0);
     expect(result.renters).toHaveLength(1);
+  });
+
+  it('preserves the first page and shared continuation when only owners overflow', async () => {
+    await setMock({
+      fetchHousingAssistance: vi
+        .fn()
+        .mockImplementation((dataset: string) =>
+          dataset === 'HousingAssistanceOwners'
+            ? { rows: [makeOwnerRow()], count: 2 }
+            : { rows: [makeRenterRow()], count: 1 },
+        ),
+    });
+    const result = await runToolContract(femaGetHousingAssistance, {
+      disaster_number: 4781,
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({
+      owners: [expect.objectContaining({ county: 'Harris' })],
+      renters: [expect.objectContaining({ county: 'Harris' })],
+      owners_count: 2,
+      renters_count: 1,
+      next_offset: 1,
+    });
+    expect(JSON.stringify(result.content)).toContain('Next offset');
+  });
+
+  it('stages both datasets at limit one when only owners overflow, preserving SQL null, zero and negative amounts', async () => {
+    await withHousingCanvas(async (canvas) => {
+      const ctx = createMockContext();
+      const owners = [
+        makeOwnerRow({ zipCode: '00609', repairReplaceAmount: null }),
+        makeOwnerRow({ zipCode: '77002', repairReplaceAmount: -12.5 }),
+      ];
+      const renters = [makeRenterRow({ zipCode: '00609', repairReplaceAmount: 0 })];
+      const fetch = vi.fn(
+        (
+          dataset: string,
+          { skip, top }: { skip: number; top: number; orderby: string; filter: string },
+        ) => {
+          const rows = dataset === 'HousingAssistanceOwners' ? owners : renters;
+          return Promise.resolve({ rows: rows.slice(skip, skip + top), count: rows.length });
+        },
+      );
+      await setMock({ fetchHousingAssistance: fetch });
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('existing', [{ keep: 'yes' }]);
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 4781,
+        county: 'Harris County',
+        limit: 1,
+        canvas_id: instance.canvasId,
+      });
+      expect(result.structuredContent).toMatchObject({
+        owners_count: 2,
+        renters_count: 1,
+        totalCount: 3,
+        next_offset: 1,
+        spilled: true,
+        canvas_id: instance.canvasId,
+        canvas_tables: [
+          {
+            dataset: 'HousingAssistanceOwners',
+            table_name: expect.any(String),
+            staged_count: 2,
+            truncated: false,
+          },
+          {
+            dataset: 'HousingAssistanceRenters',
+            table_name: expect.any(String),
+            staged_count: 1,
+            truncated: false,
+          },
+        ],
+      });
+      const {
+        canvas_tables: [ownerTable, renterTable],
+      } = result.structuredContent as {
+        canvas_tables: [{ table_name: string }, { table_name: string }];
+      };
+      expect(JSON.stringify(result.content)).toContain('HousingAssistanceRenters');
+      const rows = await instance.query(
+        `SELECT o.zip_code, o.repair_replace_amount AS owner_amount, r.repair_replace_amount AS renter_amount FROM ${ownerTable.table_name} o LEFT JOIN ${renterTable.table_name} r USING (zip_code) ORDER BY zip_code`,
+      );
+      expect(rows.rows).toEqual([
+        { zip_code: '00609', owner_amount: null, renter_amount: 0 },
+        { zip_code: '77002', owner_amount: -12.5, renter_amount: null },
+      ]);
+      expect((await instance.query('SELECT keep FROM existing')).rows).toEqual([{ keep: 'yes' }]);
+      expect(fetch.mock.calls.map(([dataset, opts]) => [dataset, opts.skip, opts.top])).toEqual([
+        ['HousingAssistanceOwners', 0, 1],
+        ['HousingAssistanceRenters', 0, 1],
+        ['HousingAssistanceOwners', 1, 1],
+      ]);
+      expect(new Set(fetch.mock.calls.map(([, opts]) => opts.orderby))).toEqual(
+        new Set(['totalApprovedIhpAmount desc,id']),
+      );
+      expect(new Set(fetch.mock.calls.map(([, opts]) => opts.filter)).size).toBe(1);
+    });
+  });
+
+  it('keeps all-fit, later and empty pages inline even on a reused canvas', async () => {
+    await withHousingCanvas(async (canvas) => {
+      const ctx = createMockContext();
+      const instance = await canvas.acquire(undefined, ctx);
+      const fetch = vi.fn((_dataset: string, { skip }: { skip: number }) =>
+        Promise.resolve({ rows: skip === 0 ? [makeOwnerRow()] : [], count: 1 }),
+      );
+      await setMock({ fetchHousingAssistance: fetch });
+      for (const offset of [0, 1]) {
+        const result = await runToolContract(femaGetHousingAssistance, {
+          disaster_number: 4781,
+          limit: 1,
+          offset,
+          canvas_id: instance.canvasId,
+        });
+        expect(result.structuredContent).toMatchObject({ spilled: false });
+        expect(result.structuredContent).not.toHaveProperty('canvas_tables');
+        expect(result.structuredContent).not.toHaveProperty('next_offset');
+      }
+      await setMock({ fetchHousingAssistance: vi.fn().mockResolvedValue({ rows: [], count: 0 }) });
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 4781,
+        limit: 1,
+        canvas_id: instance.canvasId,
+      });
+      expect(result.structuredContent).toMatchObject({
+        owners_count: 0,
+        renters_count: 0,
+        spilled: false,
+      });
+      expect(await instance.describe()).toEqual([]);
+      expect(fetch.mock.calls).toHaveLength(4);
+    });
+  });
+
+  it('stages only the nonempty renter dataset when the row budget ends the first page', async () => {
+    await withHousingCanvas(async () => {
+      const rows = [
+        makeRenterRow({ city: 'R'.repeat(72_000), zipCode: '77001' }),
+        makeRenterRow({ city: 'S'.repeat(72_000), zipCode: '77002' }),
+      ];
+      const fetch = vi.fn((dataset: string, { skip, top }: { skip: number; top: number }) =>
+        Promise.resolve(
+          dataset === 'HousingAssistanceOwners'
+            ? { rows: [], count: 0 }
+            : { rows: rows.slice(skip, skip + top), count: rows.length },
+        ),
+      );
+      await setMock({ fetchHousingAssistance: fetch });
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 4781,
+        limit: 2,
+      });
+      expect(result.structuredContent).toMatchObject({
+        owners: [],
+        renters: [expect.objectContaining({ zip_code: '77001' })],
+        owners_count: 0,
+        renters_count: 2,
+        next_offset: 1,
+        spilled: true,
+        canvas_tables: [{ dataset: 'HousingAssistanceRenters', staged_count: 2, truncated: false }],
+      });
+      expect(contentText(result)).toContain('HousingAssistanceRenters');
+      expect(contentText(result)).toContain('100,000-character');
+      expect(fetch.mock.calls).toHaveLength(2);
+    });
+  });
+
+  it('preserves an overflowing owner page and continuation when its extra fetch fails', async () => {
+    await withHousingCanvas(async (canvas) => {
+      await setMock({
+        fetchHousingAssistance: vi
+          .fn()
+          .mockResolvedValueOnce({ rows: [makeOwnerRow()], count: 2 })
+          .mockRejectedValueOnce(forbidden('OpenFEMA returned 403')),
+      });
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 4781,
+        limit: 1,
+        type: 'owners',
+      });
+      expect(result.structuredContent).toMatchObject({
+        owners: [expect.objectContaining({ county: 'Harris' })],
+        renters: [],
+        owners_count: 2,
+        renters_count: 0,
+        next_offset: 1,
+        spilled: false,
+        notice: expect.stringContaining('Canvas staging was unavailable'),
+      });
+      expect(contentText(result)).toContain('Canvas staging was unavailable');
+      expect(contentText(result)).toContain('Next offset');
+      expect(canvas.countForTenant(createMockContext())).toBe(0);
+    });
+  });
+
+  it('keeps the primary page when the tool-entry deadline expires during that read', async () => {
+    await withHousingCanvas(async (canvas) => {
+      const deadline = new AbortController();
+      const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(deadline.signal);
+      try {
+        const fetch = vi.fn(async () => {
+          expect(timeout).toHaveBeenCalledWith(50_000);
+          deadline.abort(new DOMException('Elapsed', 'TimeoutError'));
+          return { rows: [makeOwnerRow()], count: 2 };
+        });
+        const acquire = vi.spyOn(canvas, 'acquire');
+        await setMock({ fetchHousingAssistance: fetch });
+        const result = await runToolContract(femaGetHousingAssistance, {
+          disaster_number: 4781,
+          limit: 1,
+          type: 'owners',
+        });
+        expect(result.structuredContent).toMatchObject({
+          owners: [expect.objectContaining({ county: 'Harris' })],
+          owners_count: 2,
+          next_offset: 1,
+          spilled: false,
+          notice: expect.stringContaining('staging deadline elapsed'),
+        });
+        expect(contentText(result)).toContain('staging deadline elapsed');
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(acquire).not.toHaveBeenCalled();
+      } finally {
+        timeout.mockRestore();
+      }
+    });
+  });
+
+  it('returns a supplied missing canvas error with recovery on both surfaces during staging', async () => {
+    await withHousingCanvas(async () => {
+      await setMock({
+        fetchHousingAssistance: vi.fn().mockResolvedValue({ rows: [makeRenterRow()], count: 2 }),
+      });
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 4781,
+        limit: 1,
+        type: 'renters',
+        canvas_id: 'missing123',
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.NotFound,
+          data: {
+            reason: 'canvas_not_found',
+            recovery: { hint: expect.stringContaining('canvas_id') },
+          },
+        },
+      });
+      expect(contentText(result)).toContain('canvas_id');
+    });
   });
 
   it('returns zero totals when both datasets return empty', async () => {
@@ -178,6 +448,7 @@ describe('femaGetHousingAssistance', () => {
       ],
       owners_count: 2,
       renters_count: 1,
+      spilled: false,
     };
     const blocks = femaGetHousingAssistance.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -216,6 +487,7 @@ describe('femaGetHousingAssistance', () => {
       ],
       owners_count: 1,
       renters_count: 1,
+      spilled: false,
     };
     const blocks = femaGetHousingAssistance.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -352,6 +624,7 @@ describe('femaGetHousingAssistance — empty match', () => {
         renters: [],
         owners_count: 0,
         renters_count: 0,
+        spilled: false,
       })[0] as { text: string }
     ).text;
     expect(text).toContain('No housing assistance records available.');
@@ -522,6 +795,7 @@ describe('femaGetHousingAssistance — response budget and next_offset (#46)', (
         renters: kind === 'renters' ? [record as never] : [],
         owners_count: 1,
         renters_count: 1,
+        spilled: false,
       })[0] as { text: string }
     ).text;
     return text.slice(text.indexOf('### ')).replace(/\n$/, '');
@@ -912,6 +1186,7 @@ describe('femaGetHousingAssistance — inspection fields (#47)', () => {
         renters: [{ disaster_number: 4332, county: 'Harris (County)' }],
         owners_count: 1,
         renters_count: 1,
+        spilled: false,
       })[0] as { text: string }
     ).text;
     expect(text).not.toMatch(/Inspect|Damage/);
@@ -973,9 +1248,11 @@ describe('femaGetHousingAssistance — format() text, whole (characterization)',
         ],
         owners_count: 1491,
         renters_count: 1619,
+        spilled: false,
       })[0] as { text: string }
     ).text;
-    expect(text).toBe(
+    expect(text).toContain('**Spilled:** false');
+    expect(text.replace('**Spilled:** false\n', '')).toBe(
       '**Owner records:** 3 of 1491\n**Renter records:** 2 of 1619\n\n## Owner Assistance (3 of 1491 records)\n### Orange (County), VIDOR, 77662\n**State:** TX | **Disaster:** #4332\n**Registrations:** 9\n**Approved for FEMA Assistance:** 5\n**Total Approved IHP:** $1,000\n**Repair/Replacement:** $800\n**Rental Assistance:** $100\n**Other Needs:** $100\n**Inspected:** 5\n**Average Inspected Damage:** $11,438.86\n**Total Damage (FEMA Verified Loss):** $77,646,948.98\n**Inspected With No Damage:** 1\n\n### 77010\n**Disaster:** #4332\n**Inspection:** none recorded (0 applicants inspected); damage unknown\n\n### Disaster #4332\n**Disaster:** #4332\n\n## Renter Assistance (2 of 1619 records)\n### Harris (County), HOUSTON, 77002\n**State:** TX | **Disaster:** #4332\n**Registrations:** 8\n**Approved for FEMA Assistance:** 6\n**Total Approved IHP:** $1,200\n**Repair/Replacement:** $0\n**Rental Assistance:** $1,000\n**Other Needs:** $200\n**Inspected:** 3\n**Damage Degree (registrations):** none 4, moderate 2, major 1, substantial 0\n\n### Disaster #4332\n**Disaster:** #4332\n',
     );
   });

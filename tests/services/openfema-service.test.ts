@@ -46,6 +46,7 @@ async function rejection(promise: Promise<unknown>): Promise<McpError> {
 
 const queryCtx = () => createMockContext({ errors: femaQueryDataset.errors });
 const DDS = 'DisasterDeclarationsSummaries';
+const FUNDING = 'FemaWebDisasterSummaries';
 
 let fetchMock: Mock;
 let svc: OpenFemaService;
@@ -62,6 +63,65 @@ afterEach(() => {
 });
 
 describe('convenience fetchers', () => {
+  it('reads v1 funding beside the declaration without looking up dataset versions', async () => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [endpoint(DDS, 2), () => envelopeResponse(DDS, [{ disasterNumber: 4332 }], 1)],
+        [
+          endpoint(FUNDING, 1),
+          () =>
+            envelopeResponse(
+              FUNDING,
+              [{ totalAmountIhpApproved: 1656932722.84, paLoadDate: null }],
+              1,
+              'v1',
+            ),
+        ],
+      ]),
+    );
+    initOpenFemaService({} as unknown as AppConfig, {} as unknown as StorageService);
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4332 });
+    expect(result.structuredContent).toMatchObject({
+      funding: { ihp_approved: 1656932722.84, pa_load_date: null },
+    });
+    const urls = calledUrls(fetchMock);
+    expect(urls).toHaveLength(2);
+    const funding = new URL(urls[1] ?? '');
+    expect(funding.pathname).toBe('/api/open/v1/FemaWebDisasterSummaries');
+    expect(funding.searchParams.get('$filter')).toBe('disasterNumber eq 4332');
+    expect(funding.searchParams.get('$top')).toBe('1');
+    expect(funding.searchParams.get('$select')?.split(',')).toEqual([
+      'totalNumberIaApproved',
+      'totalAmountIhpApproved',
+      'totalAmountHaApproved',
+      'totalAmountOnaApproved',
+      'totalObligatedAmountPa',
+      'totalObligatedAmountCatAb',
+      'totalObligatedAmountCatC2g',
+      'totalObligatedAmountHmgp',
+      'iaLoadDate',
+      'paLoadDate',
+    ]);
+  });
+
+  it.each([
+    { metadata: { count: 0 } },
+    { FemaWebDisasterSummaries: [{ totalAmountIhpApproved: 'unavailable' }] },
+  ])('preserves a declaration when the funding response is malformed: %j', async (body) => {
+    fetchMock.mockImplementation(
+      routeFetch([
+        [endpoint(DDS, 2), () => envelopeResponse(DDS, [{ disasterNumber: 4332 }], 1)],
+        [endpoint(FUNDING, 1), () => jsonResponse(200, body)],
+      ]),
+    );
+    initOpenFemaService({} as unknown as AppConfig, {} as unknown as StorageService);
+    const result = await runToolContract(femaGetDisaster, { disaster_number: 4332 });
+    expect(result.structuredContent).not.toHaveProperty('funding');
+    expect(result.structuredContent).toMatchObject({
+      disaster_number: 4332,
+      notice: expect.stringContaining('funding summary could not be read'),
+    });
+  });
   it.each([429, 503])('does not retry an auxiliary NFIP count after HTTP %s', async (status) => {
     vi.useFakeTimers();
     fetchMock.mockResolvedValue(new Response('unavailable', { status }));
@@ -95,50 +155,62 @@ describe('convenience fetchers', () => {
     },
   );
 
-  it('bounds the auxiliary NFIP count response body at two seconds and stops its I/O', async () => {
-    vi.useFakeTimers();
-    let stopped = false;
-    fetchMock.mockImplementation((_url, options: RequestInit) =>
-      Promise.resolve(
-        new Response(
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue(new TextEncoder().encode('{'));
-              options.signal?.addEventListener(
-                'abort',
-                () => {
-                  stopped = true;
-                  controller.error(options.signal?.reason);
-                },
-                { once: true },
-              );
-            },
-          }),
+  it.each([
+    [
+      'NFIP count',
+      (service: OpenFemaService) =>
+        service.countNfipMissingCounty(
+          "state eq 'TX' and countyCode eq null",
+          createMockContext(),
+          new AbortController().signal,
         ),
-      ),
-    );
-    let settled = false;
-    const result = rejection(
-      svc.countNfipMissingCounty(
-        "state eq 'TX' and countyCode eq null",
-        createMockContext(),
-        new AbortController().signal,
-      ),
-    ).then((error) => {
-      settled = true;
-      return error;
-    });
-    await vi.advanceTimersByTimeAsync(1999);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(settled).toBe(true);
-    expect(stopped).toBe(true);
-    expect(await result).toMatchObject({
-      code: JsonRpcErrorCode.Timeout,
-      message: expect.stringContaining('timed out'),
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+    ],
+    [
+      'disaster funding',
+      (service: OpenFemaService) =>
+        service.fetchDisasterFunding(4332, createMockContext(), new AbortController().signal),
+    ],
+  ] as const)(
+    'bounds the auxiliary %s response body at two seconds and stops its I/O',
+    async (_name, read) => {
+      vi.useFakeTimers();
+      let stopped = false;
+      fetchMock.mockImplementation((_url, options: RequestInit) =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{'));
+                options.signal?.addEventListener(
+                  'abort',
+                  () => {
+                    stopped = true;
+                    controller.error(options.signal?.reason);
+                  },
+                  { once: true },
+                );
+              },
+            }),
+          ),
+        ),
+      );
+      let settled = false;
+      const result = rejection(read(svc)).then((error) => {
+        settled = true;
+        return error;
+      });
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      expect(stopped).toBe(true);
+      expect(await result).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        message: expect.stringContaining('timed out'),
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('cancels auxiliary NFIP count I/O immediately on its supplied signal', async () => {
     const abort = new AbortController();
@@ -183,7 +255,7 @@ describe('convenience fetchers', () => {
       { context: { signal: controller.signal } },
     );
     await vi.advanceTimersByTimeAsync(1);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     controller.abort();
     await vi.runAllTimersAsync();
     const result = await pending;
@@ -192,7 +264,7 @@ describe('convenience fetchers', () => {
       error: { code: JsonRpcErrorCode.RequestCancelled },
     });
     expect(JSON.stringify(result.content)).toMatch(/cancel|abort/i);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it.each([429, 'transport'] as const)(

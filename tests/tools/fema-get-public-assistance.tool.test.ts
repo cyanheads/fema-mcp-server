@@ -4,11 +4,15 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { JsonRpcErrorCode, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaGetDisaster } from '@/mcp-server/tools/definitions/fema-get-disaster.tool.js';
 import { femaGetPublicAssistance } from '@/mcp-server/tools/definitions/fema-get-public-assistance.tool.js';
+import { setCanvas } from '@/services/canvas/canvas-accessor.js';
+import type { OpenFemaService } from '@/services/openfema/openfema-service.js';
+import { paApplicantNames } from '@/services/openfema/pa-applicant-names.js';
 import { jsonFallback, renderedText } from '../helpers/rendered-markdown.js';
 
 // Only the service accessor is stubbed: the county matcher runs the real escapeODataString.
@@ -26,8 +30,13 @@ vi.mock('@/services/openfema/openfema-service.js', async (importOriginal) => {
 
 async function setMock(impl: Record<string, unknown>) {
   const mod = await import('@/services/openfema/openfema-service.js');
-  (mod as unknown as { __setMock: (s: Record<string, unknown>) => void }).__setMock(impl);
+  (mod as unknown as { __setMock: (s: Record<string, unknown>) => void }).__setMock({
+    fetchPaApplicants: vi.fn().mockResolvedValue({ rows: [], count: 0 }),
+    ...impl,
+  });
 }
+
+afterEach(() => setCanvas(undefined));
 
 function makePaRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -51,6 +60,343 @@ function makePaRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe('femaGetPublicAssistance', () => {
+  it('charges only applicant lookup time to the shared eight-second budget', async () => {
+    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] });
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Lookup deadline', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    try {
+      const fetchPaApplicants = vi
+        .fn()
+        .mockImplementationOnce(() => {
+          vi.advanceTimersByTime(1000);
+          return Promise.resolve({
+            rows: [
+              { disasterNumber: 4332, applicantId: 'first', applicantName: 'First recipient' },
+            ],
+            count: 1,
+          });
+        })
+        .mockImplementationOnce((_query, _ctx, signal: AbortSignal) => {
+          vi.advanceTimersByTime(6999);
+          expect(signal.aborted).toBe(false);
+          vi.advanceTimersByTime(1);
+          signal.throwIfAborted();
+          throw new Error('Expected the cumulative lookup deadline to abort');
+        });
+      const svc = { fetchPaApplicants } as unknown as OpenFemaService;
+      const names = paApplicantNames(svc, createMockContext(), new AbortController().signal);
+      const first = { disasterNumber: 4332, applicantId: 'first' };
+      await names.load([first]);
+      vi.advanceTimersByTime(9000);
+      await names.load([{ disasterNumber: 4332, applicantId: 'second' }]);
+      await names.load([{ disasterNumber: 4332, applicantId: 'third' }]);
+      expect(fetchPaApplicants).toHaveBeenCalledTimes(2);
+      expect(names.get(first)).toBe('First recipient');
+      expect(names.incomplete).toBe(true);
+    } finally {
+      timeout.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('stages the whole match at limit one while keeping the inline continuation', async () => {
+    const staged: unknown[] = [];
+    const registerTable = vi.fn(async (tableName: string, records: AsyncIterable<unknown>) => {
+      for await (const row of records) staged.push(row);
+      return { tableName, rowCount: staged.length };
+    });
+    const acquire = vi.fn().mockResolvedValue({ canvasId: 'abcdefghij', registerTable });
+    setCanvas({ acquire } as unknown as DataCanvas);
+    const fetchPaProjects = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [
+          makePaRow({ disasterNumber: 4332, applicantId: '201-35000-00', mitigationAmount: 0 }),
+        ],
+        count: 3,
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          makePaRow({
+            disasterNumber: 4332,
+            applicantId: '201-35000-00',
+            mitigationAmount: -123.5,
+          }),
+          { disasterNumber: 4332 },
+        ],
+        count: 3,
+      });
+    const fetchPaApplicants = vi.fn().mockResolvedValue({
+      rows: [
+        { disasterNumber: 4332, applicantId: '201-35000-00', applicantName: 'Houston, City of' },
+      ],
+      count: 1,
+    });
+    await setMock({ fetchPaProjects, fetchPaApplicants });
+    const result = await runToolContract(femaGetPublicAssistance, {
+      disaster_number: 4332,
+      county: 'Harris County',
+      limit: 1,
+      canvas_id: 'abcdefghij',
+    });
+    expect(result.structuredContent).toMatchObject({
+      returned_count: 1,
+      total_count: 3,
+      next_offset: 1,
+      spilled: true,
+      canvas_id: 'abcdefghij',
+      canvas_tables: [
+        { dataset: 'PublicAssistanceFundedProjectsDetails', staged_count: 3, truncated: false },
+      ],
+    });
+    expect(contentText(result)).toContain('**Staged rows:** 3');
+    expect(contentText(result)).toContain('**Next offset:** 1');
+    expect(acquire.mock.calls[0]?.[0]).toBe('abcdefghij');
+    const firstQuery = fetchPaProjects.mock.calls[0]?.[0];
+    expect(firstQuery).toMatchObject({
+      orderby: 'totalObligated desc,gmProjectId,hash',
+      top: 1,
+      skip: 0,
+    });
+    expect(fetchPaProjects.mock.calls[1]?.[0]).toEqual({ ...firstQuery, top: 2, skip: 1 });
+    expect(fetchPaApplicants).toHaveBeenCalledTimes(1);
+    expect(staged).toMatchObject([
+      { applicant_name: 'Houston, City of', mitigation_amount: 0 },
+      { applicant_name: 'Houston, City of', mitigation_amount: -123.5 },
+      { disaster_number: 4332 },
+    ]);
+    expect(staged[2]).not.toHaveProperty('mitigation_amount');
+  });
+
+  it('returns the named recipient and project attributes on both surfaces', async () => {
+    await setMock({
+      fetchPaProjects: vi.fn().mockResolvedValue({
+        rows: [
+          makePaRow({
+            disasterNumber: 4332,
+            applicantId: '201-35000-00',
+            stateNumberCode: '48',
+            countyCode: '201',
+            mitigationAmount: 0,
+            projectProcessStep: 'Pending Closeout Completion',
+            lastObligationDate: '2021-01-06',
+          }),
+          makePaRow({
+            disasterNumber: 4850,
+            applicantId: '045-99045-00',
+            stateNumberCode: '72',
+            countyCode: '45',
+            mitigationAmount: -3_636_864.04,
+          }),
+        ],
+        count: 2,
+      }),
+      fetchPaApplicants: vi.fn().mockResolvedValue({
+        rows: [
+          { disasterNumber: 4332, applicantId: '201-35000-00', applicantName: 'Houston, City of' },
+        ],
+        count: 1,
+      }),
+    });
+    const result = await runToolContract(femaGetPublicAssistance, { state: 'TX' });
+    expect(result.structuredContent).toMatchObject({
+      projects: [
+        {
+          applicant_name: 'Houston, City of',
+          county_fips: '48201',
+          mitigation_amount: 0,
+          project_process_step: 'Pending Closeout Completion',
+          last_obligation_date: '2021-01-06',
+        },
+        { county_fips: '72045', mitigation_amount: -3_636_864.04 },
+      ],
+    });
+    expect(contentText(result)).toContain('Houston, City of');
+    expect(contentText(result)).toContain('72045');
+    expect(contentText(result)).toContain('-3,636,864.04');
+  });
+
+  it('joins applicant pages by both keys, deduplicates pairs, and leaves misses absent', async () => {
+    const id = "A.B'1";
+    const rows = [
+      makePaRow({ disasterNumber: 4332, applicantId: id }),
+      makePaRow({ disasterNumber: 4850, applicantId: id }),
+      makePaRow({ disasterNumber: 4332, applicantId: id }),
+      makePaRow({ disasterNumber: 4851, applicantId: id }),
+      makePaRow({ disasterNumber: undefined, applicantId: 'invalid' }),
+    ];
+    const fetchPaApplicants = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [{ disasterNumber: 4850, applicantId: id, applicantName: 'Recipient 4850' }],
+        count: 3,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ disasterNumber: 4332, applicantId: id, applicantName: 'Recipient 4332' }],
+        count: 3,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ disasterNumber: 4849, applicantId: id, applicantName: 'Unrelated recipient' }],
+        count: 3,
+      });
+    await setMock({
+      fetchPaProjects: vi.fn().mockResolvedValue({ rows, count: rows.length }),
+      fetchPaApplicants,
+    });
+    const result = await runToolContract(femaGetPublicAssistance, { state: 'TX' });
+    const structured = result.structuredContent as { projects: Array<{ applicant_name?: string }> };
+    expect(structured.projects.map((row) => row.applicant_name)).toEqual([
+      'Recipient 4332',
+      'Recipient 4850',
+      'Recipient 4332',
+      undefined,
+      undefined,
+    ]);
+    expect(structured).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toContain('Unrelated recipient');
+    expect(fetchPaApplicants.mock.calls.map(([query]) => query.skip)).toEqual([0, 1, 2]);
+    const filter =
+      "(disasterNumber eq 4332 and applicantId in ('A.B''1')) or (disasterNumber eq 4850 and applicantId in ('A.B''1')) or (disasterNumber eq 4851 and applicantId in ('A.B''1'))";
+    for (const [query] of fetchPaApplicants.mock.calls) {
+      expect(query).toMatchObject({ filter, orderby: 'disasterNumber,applicantId,id' });
+    }
+  });
+
+  it('caps both encoded filter size and disaster groups without dropping eligible IDs', async () => {
+    const ids = Array.from(
+      { length: 320 },
+      (_, i) => `APPLICANT-${i.toString().padStart(5, '0')}-é`,
+    );
+    const rows = [
+      ...ids.map((applicantId) => makePaRow({ disasterNumber: 4332, applicantId })),
+      ...Array.from({ length: 36 }, (_, i) =>
+        makePaRow({ disasterNumber: 4400 + i, applicantId: `B-${i}` }),
+      ),
+      makePaRow({ applicantId: 'x'.repeat(7000) }),
+    ];
+    const fetchPaApplicants = vi.fn().mockResolvedValue({ rows: [], count: 0 });
+    await setMock({
+      fetchPaProjects: vi.fn().mockResolvedValue({ rows, count: rows.length }),
+      fetchPaApplicants,
+    });
+    const result = await runToolContract(femaGetPublicAssistance, { state: 'TX', limit: 500 });
+    const filters = fetchPaApplicants.mock.calls.map(([options]) => options.filter as string);
+    expect(filters.length).toBeGreaterThan(3);
+    expect(filters.every((filter) => encodeURIComponent(filter).length <= 6500)).toBe(true);
+    expect(
+      filters.every((filter) => (filter.match(/disasterNumber eq /g)?.length ?? 0) <= 16),
+    ).toBe(true);
+    const allFilters = filters.join(' ');
+    expect(ids.every((id) => allFilters.includes(`'${id}'`))).toBe(true);
+    expect(
+      Array.from({ length: 36 }, (_, i) =>
+        allFilters.includes(`disasterNumber eq ${4400 + i} and applicantId in ('B-${i}')`),
+      ).every(Boolean),
+    ).toBe(true);
+    expect(contentText(result)).toContain('Some PA applicant names could not be looked up.');
+  });
+
+  it('keeps names from successful lookup pages and reports an upstream lookup failure alongside paging', async () => {
+    const fetchPaApplicants = vi
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [{ disasterNumber: 4781, applicantId: 'TXHC', applicantName: 'Harris County' }],
+        count: 2,
+      })
+      .mockRejectedValueOnce(serviceUnavailable('Applicant lookup failed'));
+    await setMock({
+      fetchPaProjects: vi.fn().mockResolvedValue({ rows: [makePaRow()], count: 10 }),
+      fetchPaApplicants,
+    });
+    const result = await runToolContract(femaGetPublicAssistance, { state: 'TX', limit: 1 });
+    expect(result.structuredContent).toMatchObject({
+      projects: [{ applicant_name: 'Harris County' }],
+      next_offset: 1,
+      spilled: false,
+    });
+    for (const part of [
+      'continue with offset 1',
+      'Some PA applicant names could not be looked up.',
+    ]) {
+      expect(result.structuredContent).toMatchObject({ notice: expect.stringContaining(part) });
+      expect(contentText(result)).toContain(part);
+    }
+  });
+
+  it('propagates caller cancellation during applicant lookup', async () => {
+    const controller = new AbortController();
+    const fetchPaApplicants = vi.fn().mockImplementation(() => {
+      controller.abort();
+      return Promise.reject(serviceUnavailable('Applicant lookup interrupted'));
+    });
+    await setMock({
+      fetchPaProjects: vi.fn().mockResolvedValue({ rows: [makePaRow()], count: 1 }),
+      fetchPaApplicants,
+    });
+    const input = femaGetPublicAssistance.input.parse({ state: 'TX' });
+    await expect(
+      femaGetPublicAssistance.handler(
+        input,
+        createMockContext({ signal: controller.signal, errors: femaGetPublicAssistance.errors }),
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('keeps continuation and releases a new canvas when an additional PA page fails', async () => {
+    const drop = vi.fn().mockResolvedValue(undefined);
+    const registerTable = vi.fn(async (_tableName: string, records: AsyncIterable<unknown>) => {
+      for await (const _row of records) {
+        /* Drain to the failing page. */
+      }
+    });
+    const acquire = vi
+      .fn()
+      .mockResolvedValue({ canvasId: 'abcdefghij', registerTable, isNew: true });
+    setCanvas({ acquire, drop } as unknown as DataCanvas);
+    await setMock({
+      fetchPaProjects: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [makePaRow()], count: 2 })
+        .mockRejectedValueOnce(serviceUnavailable('Project page failed')),
+    });
+    const result = await runToolContract(femaGetPublicAssistance, { state: 'TX', limit: 1 });
+    expect(result.structuredContent).toMatchObject({
+      spilled: false,
+      next_offset: 1,
+      total_count: 2,
+      returned_count: 1,
+    });
+    expect(result.structuredContent).not.toHaveProperty('canvas_id');
+    expect(contentText(result)).toContain('Canvas staging was unavailable');
+    expect(drop.mock.calls[0]?.[0]).toBe('abcdefghij');
+  });
+
+  it('rejects expired canvas IDs with recovery on both surfaces when staging is needed', async () => {
+    const acquire = vi
+      .fn()
+      .mockRejectedValue(notFound('Canvas expired', { reason: 'canvas_not_found' }));
+    setCanvas({ acquire } as unknown as DataCanvas);
+    await setMock({
+      fetchPaProjects: vi.fn().mockResolvedValue({ rows: [makePaRow()], count: 2 }),
+    });
+    const result = await runToolContract(femaGetPublicAssistance, {
+      state: 'TX',
+      limit: 1,
+      canvas_id: 'abcdefghij',
+    });
+    expect(errorOf(result)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'canvas_not_found',
+        recovery: { hint: expect.stringContaining('Omit canvas_id') },
+      },
+    });
+    expect(contentText(result)).toContain('Omit canvas_id');
+  });
+
   it('wires the shared suffix matcher and preserves literal project text on both surfaces (#58, #67)', async () => {
     const title = '*title* <b>x</b> &amp;';
     const fetchPaProjects = vi.fn().mockResolvedValue({
@@ -252,6 +598,7 @@ describe('femaGetPublicAssistance', () => {
       ],
       total_count: 5,
       returned_count: 1,
+      spilled: false,
     };
     const blocks = femaGetPublicAssistance.format!(output);
     const text = (blocks[0] as { text: string }).text;
@@ -520,9 +867,10 @@ describe('femaGetPublicAssistance — response budget and next_offset (#46)', ()
         projects: [p as never],
         total_count: 1,
         returned_count: 1,
+        spilled: false,
       })[0] as { text: string }
     ).text
-      .replace('**1 of 1 PA projects**\n\n', '')
+      .replace('**1 of 1 PA projects**\n**Spilled:** false\n\n', '')
       .replace(/\n$/, '');
 
   it('accepts limit 10000 and rejects 10001', async () => {
@@ -669,10 +1017,11 @@ describe('femaGetPublicAssistance — format() text, whole (characterization)', 
         ],
         total_count: 6616,
         returned_count: 2,
+        spilled: false,
       })[0] as { text: string }
     ).text;
     expect(text).toBe(
-      '**2 of 6616 PA projects**\n\n## Harris County\n**Disaster:** #4332\n**Applicant ID:** 201-99201-00\n**Damage Category:** B — Protective Measures\n**Total Obligated:** $1,200\n**Federal Share Obligated:** $1,125.38\n**Project Amount:** $1,500.5\nStatus: Eligible | Size: Large | County: Harris | State: TX | PW: 12\n**First Obligated:** 2017-10-01T00:00:00.000Z\n\n## PW-unknown\n**Disaster:** #4332\n',
+      '**2 of 6616 PA projects**\n**Spilled:** false\n\n## Harris County\n**Disaster:** #4332\n**Applicant ID:** 201-99201-00\n**Damage Category:** B — Protective Measures\n**Total Obligated:** $1,200\n**Federal Share Obligated:** $1,125.38\n**Project Amount:** $1,500.5\nStatus: Eligible | Size: Large | County: Harris | State: TX | PW: 12\n**First Obligated:** 2017-10-01T00:00:00.000Z\n\n## PW-unknown\n**Disaster:** #4332\n',
     );
   });
 });

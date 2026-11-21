@@ -8,19 +8,23 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { CanvasRegistry, DataCanvas, DuckdbProvider } from '@cyanheads/mcp-ts-core/canvas';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { femaGetHousingAssistance } from '@/mcp-server/tools/definitions/fema-get-housing-assistance.tool.js';
 import { femaGetPublicAssistance } from '@/mcp-server/tools/definitions/fema-get-public-assistance.tool.js';
+import { setCanvas } from '@/services/canvas/canvas-accessor.js';
 import { initOpenFemaService } from '@/services/openfema/openfema-service.js';
 import {
   calledUrls,
   cdnBadRequestResponse,
+  ERROR_BODIES,
   endpoint,
   envelopeResponse,
+  jsonResponse,
   routeFetch,
 } from '../helpers/openfema-fixtures.js';
 
@@ -97,6 +101,60 @@ const MATRIX: Array<{
   ...FETCHED.map((owners) => ({ type: 'owners' as const, owners, renters: 'excluded' as const })),
   ...FETCHED.map((renters) => ({ type: 'renters' as const, owners: 'excluded' as const, renters })),
 ];
+
+it.each([400, 401, 403, 409])(
+  'preserves the housing page and rolls back its tables when the continuation returns HTTP %i',
+  async (status) => {
+    const provider = new DuckdbProvider({
+      defaultRowLimit: 100,
+      exportRootPath: './.canvas-exports',
+      memoryLimitMb: 64,
+      schemaSniffRows: 10,
+    });
+    const canvas = new DataCanvas(provider, new CanvasRegistry(provider));
+    const ctx = createMockContext();
+    setCanvas(canvas);
+    try {
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('existing', [{ keep: 'yes' }]);
+      fetchMock.mockImplementation(
+        routeFetch([
+          [endpoint(OWNERS, 2), () => envelopeResponse(OWNERS, [housingRow(OWNERS)], 1)],
+          [
+            endpoint(RENTERS, 2),
+            (url) =>
+              new URL(url).searchParams.get('$skip') === '1'
+                ? jsonResponse(status, ERROR_BODIES.orderbyUnknownField)
+                : envelopeResponse(RENTERS, [housingRow(RENTERS)], 2),
+          ],
+        ]),
+      );
+      const result = await runToolContract(femaGetHousingAssistance, {
+        disaster_number: 4781,
+        limit: 1,
+        canvas_id: instance.canvasId,
+      });
+      expect(result.structuredContent).toMatchObject({
+        owners: [expect.objectContaining({ total_approved_ihp_amount: 250_000 })],
+        renters: [expect.objectContaining({ total_approved_ihp_amount: 90_000 })],
+        owners_count: 1,
+        renters_count: 2,
+        next_offset: 1,
+        spilled: false,
+        notice: expect.stringContaining('Canvas staging was unavailable'),
+      });
+      expect(contentText(result)).toContain('Canvas staging was unavailable');
+      expect(contentText(result)).toContain('Next offset');
+      const pages = calledUrls(fetchMock).map((url) => new URL(url).searchParams.get('$skip'));
+      expect(pages).toEqual(['0', '0', '1']);
+      expect((await instance.describe()).map((table) => table.name)).toEqual(['existing']);
+      expect((await instance.query('SELECT keep FROM existing')).rows).toEqual([{ keep: 'yes' }]);
+    } finally {
+      setCanvas(undefined);
+      await canvas.shutdown(ctx);
+    }
+  },
+);
 
 describe('fema_get_housing_assistance — type × dataset-state matrix at offset 1100', () => {
   it.each(MATRIX)(
@@ -180,6 +238,69 @@ describe('fema_get_housing_assistance — type × dataset-state matrix at offset
 });
 
 describe('fema_get_public_assistance — paging against OpenFEMA', () => {
+  it('joins PA v2 project records to Applicants v1 over the encoded network requests', async () => {
+    const applicants = 'PublicAssistanceApplicants';
+    const pair = { disasterNumber: 4332, applicantId: '201-35000-00' };
+    fetchMock.mockImplementation(
+      routeFetch([
+        [
+          endpoint(PA, 2),
+          () => envelopeResponse(PA, [{ ...pair, applicationTitle: 'EXP Debris Removal' }], 1),
+        ],
+        [
+          endpoint(applicants, 1),
+          () => envelopeResponse(applicants, [{ ...pair, applicantName: 'Houston, City of' }], 1),
+        ],
+      ]),
+    );
+    const result = await runToolContract(femaGetPublicAssistance, { disaster_number: 4332 });
+    expect(result.structuredContent).toMatchObject({
+      projects: [{ applicant_name: 'Houston, City of' }],
+    });
+    expect(contentText(result)).toContain('Houston, City of');
+    const urls = calledUrls(fetchMock).map((url) => new URL(url));
+    expect(urls.map((url) => url.pathname.split('/').slice(-2).join('/'))).toEqual([
+      'v2/PublicAssistanceFundedProjectsDetails',
+      'v1/PublicAssistanceApplicants',
+    ]);
+    expect(urls[0]?.searchParams.get('$orderby')).toBe('totalObligated desc,gmProjectId,hash');
+    expect(urls[1]?.searchParams.get('$filter')).toBe(
+      "(disasterNumber eq 4332 and applicantId in ('201-35000-00'))",
+    );
+  });
+
+  it.each([
+    ['malformed', { wrongCollection: [], metadata: { count: 0 } }, true],
+    ['empty', { PublicAssistanceApplicants: [], metadata: { count: 0 } }, false],
+  ])(
+    'preserves inline projects when the applicant collection is %s',
+    async (_label, body, incomplete) => {
+      const pair = { disasterNumber: 4332, applicantId: '201-35000-00' };
+      fetchMock.mockImplementation(
+        routeFetch([
+          [endpoint(PA, 2), () => envelopeResponse(PA, [pair], 1)],
+          [endpoint('PublicAssistanceApplicants', 1), () => jsonResponse(200, body)],
+        ]),
+      );
+      const result = await runToolContract(femaGetPublicAssistance, { disaster_number: 4332 });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        projects: [{ disaster_number: 4332, applicant_id: '201-35000-00' }],
+        returned_count: 1,
+      });
+      expect(result.structuredContent).not.toHaveProperty('projects.0.applicant_name');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const notice = 'Some PA applicant names could not be looked up.';
+      if (incomplete) {
+        expect(result.structuredContent).toMatchObject({ notice });
+        expect(contentText(result)).toContain(notice);
+      } else {
+        expect(result.structuredContent).not.toHaveProperty('notice');
+        expect(contentText(result)).not.toContain(notice);
+      }
+    },
+  );
+
   it('returns the empty page past the end as a success carrying the upstream total', async () => {
     fetchMock.mockImplementation(
       routeFetch([[endpoint(PA, 2), () => envelopeResponse(PA, [], 1157)]]),

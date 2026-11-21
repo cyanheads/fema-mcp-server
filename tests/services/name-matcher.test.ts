@@ -294,14 +294,25 @@ describe('worst case over every input', () => {
   });
 });
 
-it('reaches every combined stored county name in every case without changing substring semantics (#52)', () => {
-  for (const stored of countyVocabulary) {
-    for (const input of [stored, stored.toLowerCase(), stored.toUpperCase()]) {
-      const spellings = countySpellings(input);
-      expect(spellings.some((spelling) => stored.includes(spelling))).toBe(true);
-      expect(spellings.length).toBeLessThanOrEqual(12);
+/** Each spelling scans the vocabulary. Alphabetical groups keep exhaustive failures localized. */
+for (const [initial, counties] of Map.groupBy(countyVocabulary, (name) =>
+  name.charAt(0).toUpperCase(),
+)) {
+  it(`reaches each stored county beginning with ${initial} in every case within the 12-term bound (#52)`, () => {
+    const failures = [];
+    for (const stored of counties) {
+      for (const input of [stored, stored.toLowerCase(), stored.toUpperCase()]) {
+        const spellings = countySpellings(input);
+        if (spellings.length > 12 || !spellings.some((spelling) => stored.includes(spelling))) {
+          failures.push({ stored, input, spellings });
+        }
+      }
     }
-  }
+    expect(failures).toEqual([]);
+  });
+}
+
+it('keeps bare county searches as substring matches (#52)', () => {
   const spellings = countySpellings('harris');
   expect(spellings.some((spelling) => 'Harris County'.includes(spelling))).toBe(true);
   expect(spellings.some((spelling) => 'Harrison County'.includes(spelling))).toBe(true);

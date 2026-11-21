@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline as literal } from '@cyanheads/mcp-ts-core/utils';
 import { renderJson, renderNotice, requiresJson } from '@/mcp-server/tools/literal-markdown.js';
 import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
@@ -12,10 +12,7 @@ import { getOpenFemaService } from '@/services/openfema/openfema-service.js';
 export const femaGetDisaster = tool('fema_get_disaster', {
   title: 'Get FEMA Disaster Details',
   description:
-    'Fetch up to 1,000 designated-area rows for a specific FEMA disaster by disaster number (e.g., 4781). ' +
-    'Discloses partial area and program coverage when more rows exist. Returns counties/municipalities along with programs observed, ' +
-    'incident period, and state info. Use fema_search_disasters to find disaster numbers. ' +
-    'The returned disaster_number chains to fema_get_public_assistance and fema_get_housing_assistance.',
+    'Fetch up to 1,000 designated-area rows for a specific FEMA disaster by disaster number (e.g., 4781). Discloses partial area and program coverage when more rows exist. Returns counties and municipalities, programs observed, incident period, and disaster-wide funding totals when available. Use fema_search_disasters to find disaster numbers. The returned disaster_number chains to fema_get_public_assistance and fema_get_housing_assistance.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     disaster_number: z
@@ -93,14 +90,55 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       .number()
       .optional()
       .describe('Upstream total designated-area rows, present when areas_truncated is true.'),
+    funding: z
+      .object({
+        ia_approved_registrations: z
+          .number()
+          .nullable()
+          .describe('Approved Individual Assistance applications.'),
+        ihp_approved: z
+          .number()
+          .nullable()
+          .describe('Approved Individuals and Households Program amount in USD.'),
+        ha_approved: z.number().nullable().describe('Approved Housing Assistance amount in USD.'),
+        ona_approved: z
+          .number()
+          .nullable()
+          .describe('Approved Other Needs Assistance amount in USD.'),
+        pa_obligated: z
+          .number()
+          .nullable()
+          .describe(
+            'Total Public Assistance obligations in USD, which can include categories outside A–B and C–G.',
+          ),
+        pa_obligated_cat_ab: z
+          .number()
+          .nullable()
+          .describe('Public Assistance obligations in USD for emergency work (categories A–B).'),
+        pa_obligated_cat_c_g: z
+          .number()
+          .nullable()
+          .describe('Public Assistance obligations in USD for permanent work (categories C–G).'),
+        hmgp_obligated: z
+          .number()
+          .nullable()
+          .describe('Hazard Mitigation Grant Program obligations in USD.'),
+        ia_load_date: z
+          .string()
+          .nullable()
+          .describe('FEMA Individual Assistance data load timestamp.'),
+        pa_load_date: z.string().nullable().describe('FEMA Public Assistance data load timestamp.'),
+      })
+      .optional()
+      .describe(
+        'Disaster-wide FEMA funding summary. Null fields are unreported. Omitted when the summary is unavailable.',
+      ),
   }),
   enrichment: {
     notice: z
       .string()
       .optional()
-      .describe(
-        'Returned/total area counts and partial program evidence, with the dataset tool for full rows.',
-      ),
+      .describe('Partial designated-area coverage and funding summary availability.'),
   },
   enrichmentTrailer: {
     notice: { render: renderNotice },
@@ -129,7 +167,8 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     }
 
     const svc = getOpenFemaService();
-    const { rows, count } = await svc.fetchDisasters(
+    const fundingAbort = new AbortController();
+    const declaration = svc.fetchDisasters(
       {
         filter: `disasterNumber eq ${input.disaster_number}`,
         select:
@@ -141,14 +180,47 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       },
       ctx,
     );
+    const fundingRead = svc
+      .fetchDisasterFunding(input.disaster_number, ctx, fundingAbort.signal)
+      .then(
+        (row) => ({ ok: true as const, row }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    const { rows, count } = await declaration.catch((error: unknown) => {
+      fundingAbort.abort();
+      throw error;
+    });
 
     if (rows.length === 0) {
+      fundingAbort.abort();
       throw ctx.fail(
         'not_found',
         `No disaster declaration found with number ${input.disaster_number}.`,
         { disasterNumber: input.disaster_number, ...ctx.recoveryFor('not_found') },
       );
     }
+    const summary = await fundingRead;
+    ctx.signal.throwIfAborted();
+    if (
+      !summary.ok &&
+      (!(summary.error instanceof McpError) ||
+        summary.error.code === JsonRpcErrorCode.InternalError ||
+        summary.error.code === JsonRpcErrorCode.RequestCancelled)
+    )
+      throw summary.error;
+    const rawFunding = summary.ok ? summary.row : undefined;
+    const funding = rawFunding && {
+      ia_approved_registrations: rawFunding.totalNumberIaApproved ?? null,
+      ihp_approved: rawFunding.totalAmountIhpApproved ?? null,
+      ha_approved: rawFunding.totalAmountHaApproved ?? null,
+      ona_approved: rawFunding.totalAmountOnaApproved ?? null,
+      pa_obligated: rawFunding.totalObligatedAmountPa ?? null,
+      pa_obligated_cat_ab: rawFunding.totalObligatedAmountCatAb ?? null,
+      pa_obligated_cat_c_g: rawFunding.totalObligatedAmountCatC2g ?? null,
+      hmgp_obligated: rawFunding.totalObligatedAmountHmgp ?? null,
+      ia_load_date: rawFunding.iaLoadDate ?? null,
+      pa_load_date: rawFunding.paLoadDate ?? null,
+    };
 
     // biome-ignore lint/style/noNonNullAssertion: rows.length === 0 checked above
     const first = rows[0]!;
@@ -168,11 +240,19 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     const pa_declared = rows.some((r) => r.paProgramDeclared === true);
     const hm_declared = rows.some((r) => r.hmProgramDeclared === true);
     const partial = count > rows.length;
+    const notices: string[] = [];
     if (partial) {
-      ctx.enrich.notice(
+      notices.push(
         `Returned ${rows.length} of ${count} designated-area rows; program flags cover only fetched rows. False flags do not establish absence in the full declaration. Use fema_query_dataset with DisasterDeclarationsSummaries and filter disasterNumber eq ${input.disaster_number} for the full rows.`,
       );
     }
+    if (!summary.ok)
+      notices.push(
+        'The OpenFEMA disaster funding summary could not be read. Retry to check funding totals.',
+      );
+    else if (!funding)
+      notices.push('OpenFEMA has no disaster funding summary row for this declaration.');
+    if (notices.length) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Disaster fetch complete', {
       disasterNumber: input.disaster_number,
@@ -193,6 +273,7 @@ export const femaGetDisaster = tool('fema_get_disaster', {
       hm_declared,
       designated_areas: designatedAreas,
       designated_area_count: designatedAreas.length,
+      ...(funding ? { funding } : {}),
       ...(partial ? { areas_truncated: true, total_designated_area_count: count } : {}),
     };
   },
@@ -211,6 +292,24 @@ export const femaGetDisaster = tool('fema_get_disaster', {
     if (result.incident_begin_date) {
       lines.push(
         `**Incident Period:** ${literal(result.incident_begin_date)}${result.incident_end_date ? ` → ${literal(result.incident_end_date)}` : ' (ongoing)'}`,
+      );
+    }
+    if (result.funding) {
+      const f = result.funding;
+      lines.push(
+        '',
+        '## Disaster-wide funding',
+        `**IA approved registrations:** ${f.ia_approved_registrations}`,
+        `**IHP approved (USD):** ${f.ihp_approved}`,
+        `**Housing Assistance approved (USD):** ${f.ha_approved}`,
+        `**Other Needs Assistance approved (USD):** ${f.ona_approved}`,
+        `**PA obligated (USD):** ${f.pa_obligated}`,
+        `**PA categories A–B obligated (USD):** ${f.pa_obligated_cat_ab}`,
+        `**PA categories C–G obligated (USD):** ${f.pa_obligated_cat_c_g}`,
+        `**HMGP obligated (USD):** ${f.hmgp_obligated}`,
+        `**IA data load date:** ${f.ia_load_date === null ? 'null' : literal(f.ia_load_date)}`,
+        `**PA data load date:** ${f.pa_load_date === null ? 'null' : literal(f.pa_load_date)}`,
+        '',
       );
     }
     const programs: string[] = [];

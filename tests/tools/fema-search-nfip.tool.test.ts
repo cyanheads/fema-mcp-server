@@ -33,7 +33,7 @@ import { renderedText } from '../helpers/rendered-markdown.js';
 
 const NFIP_V3 = endpoint('NfipClaims', 3);
 const SELECT =
-  'state,countyCode,reportedZipCode,dateOfLoss,yearOfLoss,amountPaidOnBuildingClaim,amountPaidOnContentsClaim,buildingDamageAmount,contentsDamageAmount,ratedFloodZone,causeOfDamage,occupancyType';
+  'state,countyCode,reportedZipCode,dateOfLoss,yearOfLoss,amountPaidOnBuildingClaim,amountPaidOnContentsClaim,buildingDamageAmount,contentsDamageAmount,ratedFloodZone,causeOfDamage,occupancyType,floodEvent';
 const PREVIEW_CHARS = 100_000;
 const MAX_CANVAS_ROWS = 50_000;
 const tenant = () => createMockContext({ tenantId: 'default' });
@@ -57,6 +57,7 @@ function claim(i: number) {
     ratedFloodZone: 'AE',
     causeOfDamage: '4',
     occupancyType: 11,
+    floodEvent: 'Flood Test',
     id: `9f0c${String(i).padStart(8, '0')}`,
   };
 }
@@ -132,6 +133,7 @@ const canvasChars = (c: Partial<ReturnType<typeof claim>>) =>
     rated_flood_zone: c.ratedFloodZone ?? null,
     cause_of_damage: c.causeOfDamage ?? null,
     occupancy_type: c.occupancyType ?? null,
+    flood_event: c.floodEvent ?? null,
   }).length;
 /** Canvas-row JSON length of claim `i`. */
 const rowChars = (i: number) => canvasChars(claim(i));
@@ -382,7 +384,7 @@ describe('fema_search_nfip — missing county coverage', () => {
     expect(out(result)).toMatchObject({ spilled: true, staged_count: 5000, total_count: 5000 });
     expect(out(result).notice).toContain('Staged 5000');
     expect(out(result).notice).toContain('was not checked');
-    expect(text(result)).toContain(out(result).notice);
+    expect(renderedText(text(result)).join('\n')).toContain(out(result).notice);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -796,6 +798,7 @@ describe('fema_search_nfip — canvas disabled', () => {
       ratedFloodZone: '',
       causeOfDamage: '',
       occupancyType: 0,
+      floodEvent: '',
     });
     expect(Number(param(calledUrls(fetchMock)[0] ?? '', 'top'))).toBeLessThanOrEqual(
       Math.floor(PREVIEW_CHARS / shortest),
@@ -813,11 +816,12 @@ describe('fema_search_nfip — canvas disabled', () => {
       contentsDamageAmount: 0,
       causeOfDamage: '4',
       occupancyType: 1,
+      floodEvent: 'AB',
     });
     fetchMock.mockImplementation(nfipMatch(2000, { row: short }));
     const o = out(await search({ limit: 1000 }));
     const fit = Math.floor(PREVIEW_CHARS / canvasChars(short()));
-    expect(fit).toBeGreaterThan(364);
+    expect(canvasChars(short())).toBeLessThan(canvasChars({}));
     expect(o.returned_count).toBe(fit);
     expect(o.notice).toBe(
       `Returned ${fit} of the 2000 matching claims from offset 0, the most that fit the 100,000-character inline budget; continue with offset ${fit}.`,
