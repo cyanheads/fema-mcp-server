@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-11-21 · ⚠️ Breaking
+
+FEMA disaster details now include funding totals, and assistance records can be staged for SQL.
+
 ## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-11-03
 
 Search declarations by title, inspect each area's program flags, resolve county type spellings across datasets, include legacy IA designations, and preserve literal upstream text in rendered results.
