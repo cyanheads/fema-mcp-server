@@ -4,7 +4,7 @@ description: Gates, identifier sources, and OData syntax for the fema_* tools ov
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Scope
@@ -35,10 +35,10 @@ One storm usually means several declarations: one per state, often an EM before 
 ## Gates
 
 - **Recognized county suffixes work across datasets.** The county filters of `fema_search_disasters`, `fema_get_public_assistance`, and `fema_get_housing_assistance` recognize terminal County, Parish, Borough, and Census Area forms with or without parentheses: `Harris County` and `Harris (County)` identify the same name/type. Unknown names retain exact/case fallbacks. Bare `Harris` also matches Harrison; check `matched_areas` or each row's county before totaling. A suffixed name keeps its type instead of broadening to the bare substring.
-- **County PA totals leave out `Statewide` projects.** DR-4332 has 734 of them, filed under state agencies rather than a county. When you report a county figure, say it excludes them.
+- **County PA totals leave out `Statewide` projects.** These projects are filed under state agencies. When you report a county figure, say it excludes them.
 - **IA designation does not guarantee housing records.** `ia_declared` combines legacy `iaProgramDeclared` and `ihProgramDeclared` (IHP), including older IA-only declarations. Search rollups cover the whole declaration unless `area_totals_unavailable`; detail and resource flags cover fetched rows, so a false flag with partial coverage cannot establish absence. For a county's designation, read `designated_areas` in `fema_get_disaster` or county-filtered search's `matched_areas`. Housing datasets have their own coverage and recent data can lag.
-- **Curated assistance tools return rows, not disaster totals.** For one disaster's totals, use `fema_query_dataset` on `FemaWebDisasterSummaries`, filtered `disasterNumber eq <n>`. It returns IHP approved (housing + other needs), PA obligated in total and for categories A–B and C–G (the total also covers other categories, so the two sub-totals sum to less), and HMGP. For a county or applicant breakdown, page the projects or housing records to the end with `next_offset` before you report a sum. Pages are bounded by characters, so a `fema_query_dataset` call that selects only the amount fields fits more rows per page than the curated tools do.
-- **NFIP claims carry no disaster number.** Scope them by state, county FIPS, and loss year. To tie claims to a named event, run `fema_query_dataset` on `NfipClaims` with `floodEvent eq 'Hurricane Harvey'`, keeping state and `countyCode` in the same filter. `fema_search_nfip` doesn't expose `floodEvent`.
+- **Use `fema_get_disaster` for headline funding.** Its `funding` block gives IHP approvals, PA obligations, and HMGP obligations. IHP includes housing and other needs. PA can include categories outside A–B and C–G. Cite the relevant load date and retain nulls. For a county or applicant breakdown, aggregate the project or housing table for that filter. Check each table’s staged count and truncation first. If staging is unavailable, follow `next_offset` through the last page.
+- **NFIP claims carry no disaster number.** Scope `fema_search_nfip` by state, county FIPS, and loss year. For a named event, pass the exact stored spelling in `flood_event`, such as `Hurricane Harvey`. To discover spellings, remove the event filter and inspect the year-range results. On a staged match, `GROUP BY flood_event` shows the names present on that table, including a NULL group for unnamed losses.
 - **Size an NFIP query before you aggregate it.** Compare `total_count` with the canvas row cap named in `fema_search_nfip`'s description; Harris County's Harvey claims alone come to about 49,000. When a match runs past the cap, split it by year range, stage each range onto the same canvas, and combine the tables in SQL with `UNION ALL`. Only a call at offset 0 stages.
 - **Group flood zones deliberately.** `rated_flood_zone` mixes current codes (`AE`, `VE`, `X`) with legacy ones (`A01`–`A30`, `V`-numbered, `B`, `C`) and nulls. By FEMA's definitions, every A and V code is the Special Flood Hazard Area (the 100-year floodplain), `B` is moderate hazard, and `C` is minimal hazard. `X` alone doesn't tell you whether a zone is moderate or minimal.
 - **A null claim amount means unrecorded, not $0.** SUM skips nulls, so use `COUNT(amount_paid_building)` to count the claims behind a building-payment sum, not `COUNT(*)`.
@@ -61,10 +61,10 @@ Field names differ between datasets: `stateAbbreviation` on PA project details, 
 
 ## Workflows
 
-**Money for a disaster.** Find the disaster number. For headline figures, use `FemaWebDisasterSummaries`. For a county, filter `fema_get_public_assistance` and `fema_get_housing_assistance` with its recognized name and type (such as `Harris County`), check the returned county names, page to the end, and sum. Report which PA amount you summed; the tool's field descriptions define each one.
+**Money for a disaster.** Find the disaster number. For headline figures, use `fema_get_disaster`. For a county, filter the assistance tools with its recognized name and type (such as `Harris County`). Check the returned county names. Group PA projects by applicant ID and name, or housing assistance by ZIP. Aggregate each table to the intended geography before joining to avoid multiplying amounts across projects or housing records. Report which PA amount you summed; the tool's field descriptions define each one.
 
-**Flood claims for an area.** Get the 5-digit FIPS from the declaration tools. Call `fema_search_nfip` with state, county, and year range at offset 0, then aggregate on the canvas. For a single named event, filter `floodEvent` through `fema_query_dataset` instead.
+**Flood claims for an area.** Get the 5-digit FIPS from the declaration tools. Call `fema_search_nfip` with state, county, and year range at offset 0, then aggregate on the canvas. Add `flood_event` to restrict the same workflow to a named catastrophe.
 
 **A dataset the curated tools don't cover.** List candidates from `DataSets` with `substringof` on `name`, read the dataset's fields from `DataSetFields`, read one row, then filter.
 
-A `fema_search_nfip` match too large to return inline is staged as a DataCanvas table, and the response carries a `canvas_id`; no other tool stages. Call `fema_dataframe_describe` with it for the staged table and column names before writing SQL, then `fema_dataframe_query` with a read-only query. Pass the same `canvas_id` back to `fema_search_nfip` to stage further results beside the first. A `canvas_id` that has expired returns `canvas_not_found`; re-run `fema_search_nfip` to stage the data again.
+At offset 0, PA and housing can stage a match larger than the returned page. NFIP stages when the match exceeds its character budget. Pass the returned `canvas_id` to `fema_dataframe_describe` for table and column names, then to `fema_dataframe_query` for SQL. Reuse it on later staging calls to keep related tables together. If it expires, repeat the source calls to rebuild the canvas.

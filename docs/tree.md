@@ -1,6 +1,6 @@
 # fema-mcp-server - Directory Structure
 
-Generated on: 2026-11-04 00:23:30
+Generated on: 2026-11-21 17:51:49
 
 ```text
 fema-mcp-server/
@@ -169,11 +169,13 @@ fema-mcp-server/
 │   │       └── response-budget.ts
 │   ├── services/
 │   │   ├── canvas/
-│   │   │   └── canvas-accessor.ts
+│   │   │   ├── canvas-accessor.ts
+│   │   │   └── stage-assistance.ts
 │   │   └── openfema/
 │   │       ├── name-matcher.ts
 │   │       ├── name-vocabulary.ts
 │   │       ├── openfema-service.ts
+│   │       ├── pa-applicant-names.ts
 │   │       ├── types.ts
 │   │       └── us-states.ts
 │   └── index.ts
@@ -190,6 +192,8 @@ fema-mcp-server/
 │   ├── scripts/
 │   │   └── bundle-agent-docs.test.ts
 │   ├── services/
+│   │   ├── canvas/
+│   │   │   └── stage-assistance.test.ts
 │   │   ├── name-matcher.test.ts
 │   │   ├── name-vocabulary-build.test.ts
 │   │   └── openfema-service.test.ts
